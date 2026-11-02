@@ -1,4 +1,3 @@
- # -*- coding: utf-8 -*-
 r"""
 Module for packing and unpacking integers.
 
@@ -30,28 +29,23 @@ Examples:
     >>> with context.local(endian='big'): print(repr(p(0x1ff)))
     b'\xff\x01'
 """
-from __future__ import absolute_import
-from __future__ import division
-
-import collections
-import six
+import io
 import struct
 import sys
+from typing import Any, Callable, Literal, Sequence, overload
 import warnings
-
-from six.moves import range
 
 from pwnlib.context import LocalNoarchContext
 from pwnlib.context import context
+from pwnlib.internal.typing import ASCIIStr, BytesLike
 from pwnlib.log import getLogger
 
 from pwnlib.util import iters
 
-mod = sys.modules[__name__]
 log = getLogger(__name__)
 
-def pack(number, word_size = None, endianness = None, sign = None, **kwargs):
-    r"""pack(number, word_size = None, endianness = None, sign = None, **kwargs) -> str
+def pack(number: int, word_size: Literal["all"] | int | None = None, endianness: str | None = None, sign: bool | None = None, **kwargs: Any) -> bytes:
+    r"""pack(number, word_size = None, endianness = None, sign = None, **kwargs) -> bytes
 
     Packs arbitrary-sized integer.
 
@@ -73,9 +67,10 @@ def pack(number, word_size = None, endianness = None, sign = None, **kwargs):
         kwargs: Anything that can be passed to context.local
 
     Returns:
-        The packed number as a string.
+        The packed number as a bytestring.
 
     Examples:
+
         >>> pack(0x414243, 24, 'big', True)
         b'ABC'
         >>> pack(0x414243, 24, 'little', True)
@@ -114,8 +109,8 @@ def pack(number, word_size = None, endianness = None, sign = None, **kwargs):
         endianness = context.endianness
         sign       = context.sign
 
-        if not isinstance(number, six.integer_types):
-            raise ValueError("pack(): number must be of type (int,long) (got %r)" % type(number))
+        if not isinstance(number, int):
+            raise ValueError("pack(): number must be of type int (got %r)" % type(number))
 
         if not isinstance(sign, bool):
             raise ValueError("pack(): sign must be either True or False (got %r)" % sign)
@@ -136,7 +131,7 @@ def pack(number, word_size = None, endianness = None, sign = None, **kwargs):
                 if not sign:
                     raise ValueError("pack(): number does not fit within word_size")
                 word_size = ((number + 1).bit_length() | 7) + 1
-        elif not isinstance(word_size, six.integer_types) or word_size <= 0:
+        elif not isinstance(word_size, int) or word_size <= 0:
             raise ValueError("pack(): word_size must be a positive integer or the string 'all'")
 
         if sign:
@@ -165,10 +160,10 @@ def pack(number, word_size = None, endianness = None, sign = None, **kwargs):
             return b''.join(reversed(out))
 
 @LocalNoarchContext
-def unpack(data, word_size = None):
-    r"""unpack(data, word_size = None, endianness = None, sign = None, **kwargs) -> int
+def unpack(data: BytesLike, word_size: Literal["all"] | int | None = None) -> int:
+    r"""unpack(data, word_size = None, *, endianness = None, sign = None, **kwargs) -> int
 
-    Packs arbitrary-sized integer.
+    Unpacks arbitrary-sized integer.
 
     Word-size, endianness and signedness is done according to context.
 
@@ -179,7 +174,7 @@ def unpack(data, word_size = None):
     are discarded.
 
     Arguments:
-        number (int): String to convert
+        data (bytes): Data to convert
         word_size (int): Word size of the converted integer or the string "all" (in bits).
         endianness (str): Endianness of the converted integer ("little"/"big")
         sign (str): Signedness of the converted integer (False/True)
@@ -189,6 +184,7 @@ def unpack(data, word_size = None):
         The unpacked number.
 
     Examples:
+
         >>> hex(unpack(b'\xaa\x55', 16, endian='little', sign=False))
         '0x55aa'
         >>> hex(unpack(b'\xaa\x55', 16, endian='big', sign=False))
@@ -212,7 +208,7 @@ def unpack(data, word_size = None):
     # Verify that word_size make sense
     if word_size == 'all':
         word_size = len(data) * 8
-    elif not isinstance(word_size, six.integer_types) or word_size <= 0:
+    elif not isinstance(word_size, int) or word_size <= 0:
         raise ValueError("unpack(): word_size must be a positive integer or the string 'all'")
 
     byte_size = (word_size + 7) // 8
@@ -238,8 +234,8 @@ def unpack(data, word_size = None):
     return int(number - 2*signbit)
 
 @LocalNoarchContext
-def unpack_many(data, word_size = None):
-    """unpack(data, word_size = None, endianness = None, sign = None) -> int list
+def unpack_many(data: bytes, word_size: Literal["all"] | int | None = None) -> list[int]:
+    r"""unpack_many(data, word_size = None, *, endianness = None, sign = None) -> int list
 
     Splits `data` into groups of ``word_size//8`` bytes and calls :func:`unpack` on each group.  Returns a list of the results.
 
@@ -256,21 +252,20 @@ def unpack_many(data, word_size = None):
         The unpacked numbers.
 
     Examples:
-        >>> list(map(hex, unpack_many(b'\\xaa\\x55\\xcc\\x33', 16, endian='little', sign=False)))
+
+        >>> list(map(hex, unpack_many(b'\xaa\x55\xcc\x33', 16, endian='little', sign=False)))
         ['0x55aa', '0x33cc']
-        >>> list(map(hex, unpack_many(b'\\xaa\\x55\\xcc\\x33', 16, endian='big', sign=False)))
+        >>> list(map(hex, unpack_many(b'\xaa\x55\xcc\x33', 16, endian='big', sign=False)))
         ['0xaa55', '0xcc33']
-        >>> list(map(hex, unpack_many(b'\\xaa\\x55\\xcc\\x33', 16, endian='big', sign=True)))
+        >>> list(map(hex, unpack_many(b'\xaa\x55\xcc\x33', 16, endian='big', sign=True)))
         ['-0x55ab', '-0x33cd']
-        >>> list(map(hex, unpack_many(b'\\xff\\x02\\x03', 'all', endian='little', sign=True)))
+        >>> list(map(hex, unpack_many(b'\xff\x02\x03', 'all', endian='little', sign=True)))
         ['0x302ff']
-        >>> list(map(hex, unpack_many(b'\\xff\\x02\\x03', 'all', endian='big', sign=True)))
+        >>> list(map(hex, unpack_many(b'\xff\x02\x03', 'all', endian='big', sign=True)))
         ['-0xfdfd']
     """
     # Lookup in context if None
     word_size  = word_size  or context.word_size
-    endianness = context.endianness
-    sign       = context.sign
 
     if word_size == 'all':
         return [unpack(data, word_size)]
@@ -291,92 +286,380 @@ def unpack_many(data, word_size = None):
 #
 # Make individual packers, e.g. _p8lu
 #
-ops   = ['p','u']
-sizes = {8:'b', 16:'h', 32:'i', 64:'q'}
-ends  = ['b','l']
-signs = ['s','u']
+def __setup_internal_packers():
+    ops   = ['p','u']
+    sizes = {8:'b', 16:'h', 32:'i', 40: '', 48: '', 56: '', 64:'q'}
+    ends  = ['b','l']
+    signs = ['s','u']
 
-return_types     = {'p': 'bytes', 'u': 'int'}
-op_verbs         = {'p': 'pack', 'u': 'unpack'}
-arg_doc          = {'p': 'number (int): Number to convert',
-                    'u': 'data (bytes): Byte string to convert'}
-rv_doc           = {'p': 'The packed number as a byte string',
-                    'u': 'The unpacked number'}
+    op_verbs         = {'p': 'pack', 'u': 'unpack'}
 
 
-def make_single(op,size,end,sign):
-    name = '_%s%s%s%s' % (op, size, end, sign)
-    fmt  = sizes[size]
-    end = '>' if end == 'b' else '<'
+    def make_single(op: str, size: int, end: str, sign: str) -> tuple[str, Callable[[bytes | bytearray | str, int], int] | Callable[[int, int], bytes]]:
+        name = '_%s%s%s%s' % (op, size, end, sign)
+        fmt  = sizes[size]
 
-    if sign == 'u':
-        fmt = fmt.upper()
-    fmt = end+fmt
+        # Handle non-standard sizes without the struct module.
+        if fmt == '':
+            endianess = 'big' if end == 'b' else 'little'
+            if op == 'u':
+                def routine_unpack_irregular(data: bytes | bytearray | str, stacklevel: int = 1) -> int:
+                    data = _need_bytes(data, stacklevel)
+                    return unpack(data, size, endianness=endianess, sign=sign == 's')
+                routine_unpack_irregular.__name__ = routine_unpack_irregular.__qualname__ = name
+                return name, routine_unpack_irregular
+            else:
+                def routine_pack_irregular(data: int, stacklevel: int | None = None) -> bytes:
+                    return pack(data, size, endianness=endianess, sign=sign == 's')
+                routine_pack_irregular.__name__ = routine_pack_irregular.__qualname__ = name
+                return name, routine_pack_irregular
 
-    struct_op = getattr(struct.Struct(fmt), op_verbs[op])
-    if op == 'u':
-        def routine(data, stacklevel=1):
-            data = _need_bytes(data, stacklevel)
-            return struct_op(data)[0]
-    else:
-        def routine(data, stacklevel=None):
-            return struct_op(data)
-    routine.__name__ = routine.__qualname__ = name
+        end = '>' if end == 'b' else '<'
 
-    return name, routine
+        if sign == 'u':
+            fmt = fmt.upper()
+        fmt = end+fmt
 
+        struct_op = getattr(struct.Struct(fmt), op_verbs[op])
+        if op == 'u':
+            def routine_unpack(data: ASCIIStr, stacklevel: int = 1) -> int:
+                data = _need_bytes(data, stacklevel)
+                return struct_op(data)[0]
+            routine_unpack.__name__ = routine_unpack.__qualname__ = name
+            return name, routine_unpack
+        else:
+            def routine_pack(data: int, stacklevel: int | None = None) -> bytes:
+                return struct_op(data)
+            routine_pack.__name__ = routine_pack.__qualname__ = name
+            return name, routine_pack
 
-for op,size,end,sign in iters.product(ops, sizes, ends, signs):
-    name, routine = make_single(op,size,end,sign)
-    setattr(mod, name, routine)
+    mod = sys.modules[__name__]
+    for op,size,end,sign in iters.product(ops, sizes, ends, signs):
+        name, routine = make_single(op,size,end,sign)
+        setattr(mod, name, routine)
 
+__setup_internal_packers()
 
 #
 # Make normal user-oriented packers, e.g. p8
 #
-def make_multi(op, size):
+@overload
+def _do_packing(op: Literal['p'], size: int, number: int, endianness: str | None = None) -> bytes: ...
+@overload
+def _do_packing(op: Literal['u'], size: int, number: bytes, endianness: str | None = None) -> int: ...
+def _do_packing(op: Literal['p', 'u'], size: int, number: int | bytes, endianness: str | None = None) -> bytes | int:
 
     name = "%s%s" % (op,size)
+    mod = sys.modules[__name__]
 
     ls = getattr(mod, "_%sls" % (name))
     lu = getattr(mod, "_%slu" % (name))
     bs = getattr(mod, "_%sbs" % (name))
     bu = getattr(mod, "_%sbu" % (name))
 
-    @LocalNoarchContext
-    def routine(number):
-        endian = context.endian
-        signed = context.signed
-        return {("little", True  ): ls,
-                ("little", False):  lu,
-                ("big",    True  ): bs,
-                ("big",    False):  bu}[endian, signed](number, 3)
+    endian = endianness or context.endian
+    signed = context.signed
+    return {("little", True ):  ls,
+            ("little", False):  lu,
+            ("big",    True ):  bs,
+            ("big",    False):  bu}[endian, signed](number, 3)
 
-    routine.__name__ = name
-    routine.__doc__  = """%s%s(number, sign, endian, ...) -> %s
+@LocalNoarchContext
+def p8(number: int, endianness: str | None = None, **kwargs: Any) -> bytes:
+    """p8(number, endianness, sign, ...) -> bytes
 
-    %ss an %s-bit integer
+    Packs an 8-bit integer
 
     Arguments:
-        %s
+        number (int): Number to convert
         endianness (str): Endianness of the converted integer ("little"/"big")
         sign (str): Signedness of the converted integer ("unsigned"/"signed")
         kwargs (dict): Arguments passed to context.local(), such as
             ``endian`` or ``signed``.
 
     Returns:
-        %s
-    """ % (op, size, return_types[op], op_verbs[op].title(), size, arg_doc[op], rv_doc[op])
+        The packed number as a byte string
+    """
+    return _do_packing('p', 8, number, endianness)
 
-    return name, routine
+@LocalNoarchContext
+def p16(number: int, endianness: str | None = None, **kwargs: Any) -> bytes:
+    """p16(number, endianness, sign, ...) -> bytes
 
+    Packs an 16-bit integer
 
-for op,size in iters.product(ops, sizes):
-    name, routine = make_multi(op,size)
-    setattr(mod, name, routine)
+    Arguments:
+        number (int): Number to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
 
-def make_packer(word_size = None, sign = None, **kwargs):
-    """make_packer(word_size = None, endianness = None, sign = None) -> number → str
+    Returns:
+        The packed number as a byte string
+
+    Examples:
+
+        >>> p16(0x4142, 'big')
+        b'AB'
+        >>> p16(0x4142, endianness='big')
+        b'AB'
+    """
+    return _do_packing('p', 16, number, endianness)
+
+@LocalNoarchContext
+def p32(number: int, endianness: str | None = None, **kwargs: Any) -> bytes:
+    """p32(number, endianness, sign, ...) -> bytes
+
+    Packs an 32-bit integer
+
+    Arguments:
+        number (int): Number to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The packed number as a byte string
+
+    Examples:
+
+        >>> p32(0x41424344, 'big')
+        b'ABCD'
+        >>> p32(0x41424344, endianness='big')
+        b'ABCD'
+    """
+    return _do_packing('p', 32, number, endianness)
+
+@LocalNoarchContext
+def p40(number: int, endianness: str | None = None, **kwargs: Any) -> bytes:
+    """p40(number, endianness, sign, ...) -> bytes
+
+    Packs an 40-bit integer
+
+    Arguments:
+        number (int): Number to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The packed number as a byte string
+
+    Examples:
+
+        >>> p40(0x4142434445, 'big')
+        b'ABCDE'
+        >>> p40(0x4142434445, endianness='big')
+        b'ABCDE'
+    """
+    return _do_packing('p', 40, number, endianness)
+
+@LocalNoarchContext
+def p48(number: int, endianness: str | None = None, **kwargs: Any) -> bytes:
+    """p48(number, endianness, sign, ...) -> bytes
+
+    Packs an 48-bit integer
+
+    Arguments:
+        number (int): Number to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The packed number as a byte string
+
+    Examples:
+
+        >>> p48(0x414243444546, 'big')
+        b'ABCDEF'
+        >>> p48(0x414243444546, endianness='big')
+        b'ABCDEF'
+    """
+    return _do_packing('p', 48, number, endianness)
+
+@LocalNoarchContext
+def p56(number: int, endianness: str | None = None, **kwargs: Any) -> bytes:
+    """p56(number, endianness, sign, ...) -> bytes
+
+    Packs an 56-bit integer
+
+    Arguments:
+        number (int): Number to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The packed number as a byte string
+
+    Examples:
+
+        >>> p56(0x41424344454647, 'big')
+        b'ABCDEFG'
+        >>> p56(0x41424344454647, endianness='big')
+        b'ABCDEFG'
+    """
+    return _do_packing('p', 56, number, endianness)
+
+@LocalNoarchContext
+def p64(number: int, endianness: str | None = None, **kwargs: Any) -> bytes:
+    """p64(number, endianness, sign, ...) -> bytes
+
+    Packs an 64-bit integer
+
+    Arguments:
+        number (int): Number to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The packed number as a byte string
+
+    Examples:
+
+        >>> p64(0x4142434445464748, 'big')
+        b'ABCDEFGH'
+        >>> p64(0x4142434445464748, endianness='big')
+        b'ABCDEFGH'
+    """
+    return _do_packing('p', 64, number, endianness)
+
+@LocalNoarchContext
+def u8(data: bytes, endianness: str | None = None, **kwargs: Any) -> int:
+    """u8(data, endianness, sign, ...) -> int
+
+    Unpacks an 8-bit integer
+
+    Arguments:
+        data (bytes): Byte string to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The unpacked number
+    """
+    return _do_packing('u', 8, data, endianness)
+
+@LocalNoarchContext
+def u16(data: bytes, endianness: str | None = None, **kwargs: Any) -> int:
+    """u16(data, endianness, sign, ...) -> int
+
+    Unpacks an 16-bit integer
+
+    Arguments:
+        data (bytes): Byte string to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The unpacked number
+    """
+    return _do_packing('u', 16, data, endianness)
+
+@LocalNoarchContext
+def u32(data: bytes, endianness: str | None = None, **kwargs: Any) -> int:
+    """u32(data, endianness, sign, ...) -> int
+
+    Unpacks an 32-bit integer
+
+    Arguments:
+        data (bytes): Byte string to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The unpacked number
+    """
+    return _do_packing('u', 32, data, endianness)
+
+@LocalNoarchContext
+def u40(data: bytes, endianness: str | None = None, **kwargs: Any) -> int:
+    """u40(data, endianness, sign, ...) -> int
+
+    Unpacks an 40-bit integer
+
+    Arguments:
+        data (bytes): Byte string to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The unpacked number
+    """
+    return _do_packing('u', 40, data, endianness)
+
+@LocalNoarchContext
+def u48(data: bytes, endianness: str | None = None, **kwargs: Any) -> int:
+    """u48(data, endianness, sign, ...) -> int
+
+    Unpacks an 48-bit integer
+
+    Arguments:
+        data (bytes): Byte string to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The unpacked number
+    """
+    return _do_packing('u', 48, data, endianness)
+
+@LocalNoarchContext
+def u56(data: bytes, endianness: str | None = None, **kwargs: Any) -> int:
+    """u56(data, endianness, sign, ...) -> int
+
+    Unpacks an 56-bit integer
+
+    Arguments:
+        data (bytes): Byte string to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The unpacked number
+    """
+    return _do_packing('u', 56, data, endianness)
+
+@LocalNoarchContext
+def u64(data: bytes, endianness: str | None = None, **kwargs: Any) -> int:
+    """u64(data, endianness, sign, ...) -> int
+
+    Unpacks an 64-bit integer
+
+    Arguments:
+        data (bytes): Byte string to convert
+        endianness (str): Endianness of the converted integer ("little"/"big")
+        sign (str): Signedness of the converted integer ("unsigned"/"signed")
+        kwargs (dict): Arguments passed to context.local(), such as
+            ``endian`` or ``signed``.
+
+    Returns:
+        The unpacked number
+    """
+    return _do_packing('u', 64, data, endianness)
+
+def make_packer(word_size: Literal["all"] | int | None = None, sign: str | None = None, **kwargs: Any) -> Callable[[int], bytes]:
+    r"""make_packer(word_size = None, endianness = None, sign = None) -> number → bytes
 
     Creates a packer by "freezing" the given arguments.
 
@@ -395,11 +678,12 @@ def make_packer(word_size = None, sign = None, **kwargs):
         of that number in a packed form.
 
     Examples:
+
         >>> p = make_packer(32, endian='little', sign='unsigned')
         >>> p
         <function _p32lu at 0x...>
         >>> p(42)
-        b'*\\x00\\x00\\x00'
+        b'*\x00\x00\x00'
         >>> p(-1)
         Traceback (most recent call last):
             ...
@@ -438,10 +722,10 @@ def make_packer(word_size = None, sign = None, **kwargs):
         return lambda number: pack(number, word_size, endianness, sign)
 
 @LocalNoarchContext
-def make_unpacker(word_size = None, endianness = None, sign = None, **kwargs):
+def make_unpacker(word_size: Literal["all"] | int | None = None, endianness: str | None = None, sign: str | None = None, **kwargs: Any) -> Callable[[bytes], int]:
     """make_unpacker(word_size = None, endianness = None, sign = None,  **kwargs) -> str → number
 
-    Creates a unpacker by "freezing" the given arguments.
+    Creates an unpacker by "freezing" the given arguments.
 
     Semantically calling ``make_unpacker(w, e, s)(data)`` is equivalent to calling
     ``unpack(data, w, e, s)``. If word_size is one of 8, 16, 32 or 64, it is however
@@ -454,10 +738,11 @@ def make_unpacker(word_size = None, endianness = None, sign = None, **kwargs):
         kwargs: Additional context flags, for setting by alias (e.g. ``endian=`` rather than index)
 
     Returns:
-        A function, which takes a single argument in the form of a string and returns a number
-        of that string in an unpacked form.
+        A function, which takes a single argument in the form of a bytestring and returns a number
+        of that bytestring in an unpacked form.
 
     Examples:
+
         >>> u = make_unpacker(32, endian='little', sign='unsigned')
         >>> u
         <function _u32lu at 0x...>
@@ -498,12 +783,12 @@ def make_unpacker(word_size = None, endianness = None, sign = None, **kwargs):
     else:
         return lambda number: unpack(number, word_size, endianness, sign)
 
-def _fit(pieces, preprocessor, packer, filler, stacklevel=1):
+def _fit(pieces, preprocessor, packer, filler, stacklevel: int = 1):
 
     # Pulls bytes from `filler` and adds them to `pad` until it ends in `key`.
     # Returns the index of `key` in `pad`.
     pad = bytearray()
-    def fill(key):
+    def fill(key: bytes | bytearray) -> int:
         key = bytearray(key)
         offset = pad.find(key)
         while offset == -1:
@@ -517,10 +802,10 @@ def _fit(pieces, preprocessor, packer, filler, stacklevel=1):
     pieces_ = dict()
     large_key = 2**(context.word_size-8)
     for k, v in pieces.items():
-        if isinstance(k, six.integer_types):
+        if isinstance(k, int):
             if k >= large_key:
                 k = fill(pack(k))
-        elif isinstance(k, (six.text_type, bytearray, bytes)):
+        elif isinstance(k, (str, bytearray, bytes)):
             k = fill(_need_bytes(k, stacklevel, 0x80))
         else:
             raise TypeError("flat(): offset must be of type int or str, but got '%s'" % type(k))
@@ -573,7 +858,7 @@ def _fit(pieces, preprocessor, packer, filler, stacklevel=1):
 
     return filler, out_negative + out
 
-def _flat(args, preprocessor, packer, filler, stacklevel=1):
+def _flat(args, preprocessor, packer, filler, stacklevel: int = 1) -> bytes:
     out = []
     for arg in args:
 
@@ -590,9 +875,9 @@ def _flat(args, preprocessor, packer, filler, stacklevel=1):
             filler, val = _fit(arg, preprocessor, packer, filler, stacklevel + 1)
         elif isinstance(arg, bytes):
             val = arg
-        elif isinstance(arg, six.text_type):
+        elif isinstance(arg, str):
             val = _need_bytes(arg, stacklevel + 1)
-        elif isinstance(arg, six.integer_types):
+        elif isinstance(arg, int):
             val = packer(arg)
         elif isinstance(arg, bytearray):
             val = bytes(arg)
@@ -609,9 +894,9 @@ def _flat(args, preprocessor, packer, filler, stacklevel=1):
     return b''.join(out)
 
 @LocalNoarchContext
-def flat(*args, **kwargs):
+def flat(*args: Any, **kwargs: Any) -> bytes:
     r"""flat(\*args, preprocessor = None, length = None, filler = de_bruijn(),
-     word_size = None, endianness = None, sign = None) -> str
+     word_size = None, endianness = None, sign = None) -> bytes
 
     Flattens the arguments into a string.
 
@@ -655,7 +940,7 @@ def flat(*args, **kwargs):
     Examples:
 
         (Test setup, please ignore)
-    
+
         >>> context.clear()
 
         Basic usage of :meth:`flat` works similar to the pack() routines.
@@ -701,8 +986,8 @@ def flat(*args, **kwargs):
         b'aaaabaaacaaaAAAAeaaafaaaHello'
 
         Dictionary usage permits directly using values derived from :func:`.cyclic`.
-        See :func:`.cyclic`, :function:`pwnlib.context.context.cyclic_alphabet`, and :data:`.context.cyclic_size`
-        for more options.  
+        See :func:`.cyclic`, :func:`pwnlib.context.context.cyclic_alphabet`, and :data:`.context.cyclic_size`
+        for more options.
 
         The cyclic pattern can be provided as either the text or hexadecimal offset.
 
@@ -753,7 +1038,7 @@ def flat(*args, **kwargs):
 
         Negative indices are also supported, though this only works for integer
         keys.
-    
+
         >>> flat({-4: b'x', -1: b'A', 0: b'0', 4: b'y'})
         b'xaaA0aaay'
     """
@@ -765,7 +1050,7 @@ def flat(*args, **kwargs):
     length       = kwargs.pop('length', None)
     stacklevel   = kwargs.pop('stacklevel', 0)
 
-    if isinstance(filler, (str, six.text_type)):
+    if isinstance(filler, str):
         filler = bytearray(_need_bytes(filler))
 
     if kwargs != {}:
@@ -781,7 +1066,7 @@ def flat(*args, **kwargs):
 
     return out
 
-def fit(*args, **kwargs):
+def fit(*args: Any, **kwargs: Any) -> bytes:
     """Legacy alias for :func:`flat`"""
     kwargs['stacklevel'] = kwargs.get('stacklevel', 0) + 1
     return flat(*args, **kwargs)
@@ -823,33 +1108,33 @@ def fit(*args, **kwargs):
 
     """
 
-def signed(integer):
+def signed(integer: int) -> int:
     return unpack(pack(integer), signed=True)
 
-def unsigned(integer):
+def unsigned(integer: int) -> int:
     return unpack(pack(integer))
 
-def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
-    """dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False) -> dst
+def dd(dst, src, count: int = 0, skip: int = 0, seek: int = 0, truncate: bool = False):
+    r"""dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False) -> dst
 
     Inspired by the command line tool ``dd``, this function copies `count` byte
     values from offset `seek` in `src` to offset `skip` in `dst`.  If `count` is
     0, all of ``src[seek:]`` is copied.
 
-    If `dst` is a mutable type it will be updated.  Otherwise a new instance of
+    If `dst` is a mutable type it will be updated.  Otherwise, a new instance of
     the same type will be created.  In either case the result is returned.
 
-    `src` can be an iterable of characters or integers, a unicode string or a
+    `src` can be an iterable of characters or integers, a string or a
     file object.  If it is an iterable of integers, each integer must be in the
-    range [0;255].  If it is a unicode string, its UTF-8 encoding will be used.
+    range [0;255].  If it is a string, its UTF-8 encoding will be used.
 
     The seek offset of file objects will be preserved.
 
     Arguments:
         dst: Supported types are :class:`file`, :class:`list`, :class:`tuple`,
-             :class:`str`, :class:`bytearray` and :class:`unicode`.
-        src: An iterable of byte values (characters or integers), a unicode
-             string or a file object.
+             :class:`str` and :class:`bytearray`.
+        src: An iterable of byte values (characters or integers), a string or
+             a file object.
         count (int): How many bytes to copy.  If `count` is 0 or larger than
                      ``len(src[seek:])``, all bytes until the end of `src` are
                      copied.
@@ -863,16 +1148,26 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
         modified in-place.
 
     Examples:
+
         >>> dd(tuple('Hello!'), b'?', skip = 5)
         ('H', 'e', 'l', 'l', 'o', b'?')
         >>> dd(list('Hello!'), (63,), skip = 5)
         ['H', 'e', 'l', 'l', 'o', b'?']
+        >>> buf = bytearray(b'Hello!')
+        >>> dd(buf, b'?', skip = 5)
+        bytearray(b'Hello?')
+        >>> buf
+        bytearray(b'Hello?')
+
+    .. doctest::
+        :options: +POSIX +TODO
+
         >>> _ = open('/tmp/foo', 'w').write('A' * 10)
         >>> dd(open('/tmp/foo'), open('/dev/zero'), skip = 3, count = 4).read()
-        'AAA\\x00\\x00\\x00\\x00AAA'
+        'AAA\x00\x00\x00\x00AAA'
         >>> _ = open('/tmp/foo', 'w').write('A' * 10)
         >>> dd(open('/tmp/foo'), open('/dev/zero'), skip = 3, count = 4, truncate = True).read()
-        'AAA\\x00\\x00\\x00\\x00'
+        'AAA\x00\x00\x00\x00'
     """
 
     # Re-open file objects to make sure we have the mode right
@@ -884,7 +1179,7 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
 
     # Special case: both `src` and `dst` are files, so we don't need to hold
     # everything in memory
-    if hasattr(src, 'seek') and hasattr(dst, 'seek'):
+    if isinstance(src, io.IOBase) and isinstance(dst, io.IOBase):
         src.seek(seek)
         dst.seek(skip)
         n = 0
@@ -910,7 +1205,7 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
 
     # Otherwise get `src` in canonical form, i.e. a string of at most `count`
     # bytes
-    if isinstance(src, six.text_type):
+    if isinstance(src, str):
         if count:
             # The only way to know where the `seek`th byte is, is to decode, but
             # we only need to decode up to the first `seek + count` code points
@@ -920,7 +1215,7 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
         else:
             src = src.encode('utf8')[seek:]
 
-    elif hasattr(src, 'seek'):
+    elif isinstance(src, io.IOBase):
         src.seek(seek)
         src_ = b''
         if count:
@@ -944,7 +1239,7 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
         else:
             src = src[seek:]
 
-    elif hasattr(src, '__iter__'):
+    elif isinstance(src, Sequence):
         src = src[seek:]
         src_ = b''
         for i, b in enumerate(src, seek):
@@ -952,7 +1247,7 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
                 break
             if isinstance(b, bytes):
                 src_ += b
-            elif isinstance(b, six.integer_types):
+            elif isinstance(b, int):
                 if b > 255 or b < 0:
                     raise ValueError("dd(): Source value %d at index %d is not in range [0;255]" % (b, i))
                 src_ += _p8lu(b)
@@ -968,14 +1263,14 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
         truncate = skip + len(src)
 
     # UTF-8 encode unicode `dst`
-    if isinstance(dst, six.text_type):
+    if isinstance(dst, str):
         dst = dst.encode('utf8')
         utf8 = True
     else:
         utf8 = False
 
     # Match on the type of `dst`
-    if   hasattr(dst, 'seek'):
+    if isinstance(dst, io.IOBase):
         dst.seek(skip)
         dst.write(src)
         if truncate:
@@ -984,7 +1279,12 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
         dst = real_dst
 
     elif isinstance(dst, (list, bytearray)):
-        dst[skip : skip + len(src)] = list(map(p8, bytearray(src)))
+        # A bytearray slice takes a byte string, while a list slice takes the
+        # single-byte bytes objects that p8() returns.
+        if isinstance(dst, bytearray):
+            dst[skip : skip + len(src)] = src
+        else:
+            dst[skip : skip + len(src)] = list(map(p8, bytearray(src)))
         if truncate:
             while len(dst) > truncate:
                 dst.pop()
@@ -1004,14 +1304,16 @@ def dd(dst, src, count = 0, skip = 0, seek = 0, truncate = False):
     else:
         raise TypeError("dd(): Unsupported `dst` type: %r" % type(dst))
 
-    if utf8:
+    if utf8 and isinstance(dst, bytes):
         dst = dst.decode('utf8')
 
     return dst
 
-def _need_bytes(s, level=1, min_wrong=0):
-    if isinstance(s, (bytes, bytearray)):
+def _need_bytes(s: ASCIIStr | memoryview, level: int = 1, min_wrong: int = 0) -> bytes:
+    if isinstance(s, bytes):
         return s   # already bytes
+    if isinstance(s, (bytearray, memoryview)):
+        return bytes(s)
 
     encoding = context.encoding
     errors = 'strict'
@@ -1027,32 +1329,37 @@ def _need_bytes(s, level=1, min_wrong=0):
             encoding = 'ASCII'
 
     if worst >= min_wrong:
-        warnings.warn("Text is not bytes; assuming {}, no guarantees. See https://docs.pwntools.com/#bytes"
-                      .format(encoding), BytesWarning, level + 2)
+        warnings.warn(f"Text is not bytes; assuming {encoding}, no guarantees. See https://docs.pwntools.com/#bytes",
+                      BytesWarning, level + 2)
     return s.encode(encoding, errors)
 
-def _need_text(s, level=1):
-    if isinstance(s, (str, six.text_type)):
+def _need_text(s: ASCIIStr | object, level: int = 1) -> str:
+    if isinstance(s, str):
         return s   # already text
+
+    if not isinstance(s, (bytes, bytearray)):
+        return repr(s)
 
     encoding = context.encoding
     errors = 'strict'
     if encoding == 'auto':
         for encoding in 'ASCII', 'UTF-8', 'ISO-8859-1':
             try:
-                s = s.decode(encoding)
+                s.decode(encoding)
             except UnicodeDecodeError:
                 pass
             else:
                 break
 
-    warnings.warn("Bytes is not text; assuming {}, no guarantees. See https://docs.pwntools.com/#bytes"
-                  .format(encoding), BytesWarning, level + 2)
+    warnings.warn(f"Bytes is not text; assuming {encoding}, no guarantees. See https://docs.pwntools.com/#bytes",
+                  BytesWarning, level + 2)
     return s.decode(encoding, errors)
 
-def _encode(s):
-    if isinstance(s, (bytes, bytearray)):
+def _encode(s: ASCIIStr | memoryview) -> bytes:
+    if isinstance(s, bytes):
         return s   # already bytes
+    if isinstance(s, (bytearray, memoryview)):
+        return bytes(s)
 
     if context.encoding == 'auto':
         try:
@@ -1061,15 +1368,104 @@ def _encode(s):
             return s.encode('utf-8', 'surrogateescape')
     return s.encode(context.encoding)
 
-def _decode(b):
+def _decode(b: ASCIIStr) -> str:
+    if isinstance(b, str):
+        return b   # already text
+
     if context.encoding == 'auto':
         try:
             return b.decode('utf-8')
         except UnicodeDecodeError:
             return b.decode('latin1')
-        except AttributeError:
-            return b
     return b.decode(context.encoding)
 
-del op, size, end, sign
-del name, routine, mod
+def overlap(*structs: bytes | tuple[bytes, int]) -> bytes:
+    r"""overlap(*structs: bytes | tuple[bytes, int]) -> bytes
+
+    Merge multiple byte sequences with possible positional offsets into a
+    single overlapped bytes object. From lowest byte index, scan through
+    every bytes object, if only one byte is non-zero, then the output will
+    append that byte. If multiple non-zero bytes are found at the same index,
+    an error will be thrown as these bytes objects can not be overlapped.
+
+    If holes present as the bytes object has an ``offset`` or its length is
+    not enough to align to the output bytes object length, these holes are
+    set to ``\x00`` implicitly.
+
+    See the examples below for how this function works.
+
+    Arguments:
+        *structs(bytes | tuple[bytes, int]): ``bytes`` objects like ``b'123'``
+            or adding an optional offset like ``(b'123', 3)``. The ``offset``
+            can be positive or negative or 0. ``bytes`` objects has an
+            implicit offset 0.
+
+    Returns:
+        A **minimal** bytes object merged from input bytes objects.
+        That means, offsets are aligned to 0 first to keep output minimal.
+
+    Raises:
+        BufferError: If multiple non-zero values appears at the same index
+
+    Examples:
+
+        >>> overlap(b'\x00123', b'a\x00\x00\x00b')
+        b'a123b'
+        >>> overlap(b'11\x00\x0022', (b'33\x00\x0044', 2))
+        b'11332244'
+        >>> overlap((b'123', -10), (b'45\x00', -6)) # not b'123\x0045\x00\x00\x00\x00'
+        b'123\x0045\x00'
+        >>> overlap((b'xx', 2), (b'yy', 0))
+        b'yyxx'
+        >>> overlap((b'123', 1), b'456')
+        Traceback (most recent call last):
+            ...
+        BufferError: Conflicting value structs[0][0] = 0x31 and structs[1][1] = 0x35 when overlapping
+    """
+    if len(structs) == 0:
+        return b''
+    if len(structs) == 1:
+        if isinstance(structs[0], tuple):
+            return _need_bytes(structs[0][0])
+        return _need_bytes(structs[0])  # structs[0] is bytes
+
+    segments: list[tuple[bytes, int]] = [
+        # ensure types
+        (_need_bytes(elem[0]), int(elem[1]))
+        if isinstance(elem, tuple) else
+        (_need_bytes(elem), 0)
+        for elem in structs
+    ]
+
+    # find lowest offset and subtract it to align offsets
+    compensation = min(elem[1] for elem in segments)
+    segments = [(elem[0], elem[1] - compensation) for elem in segments]
+
+    length = max(len(elem[0]) + elem[1] for elem in segments)
+    output = bytearray(length) # bytearray initialize all bytes as 0
+
+    # overlap segments and fail if multiple non-zero value at the same index
+    for seg_i, e in enumerate(segments):
+        segment, offset = e
+        for i, b in enumerate(segment):
+            if b != 0:
+                abs_idx = offset + i
+                if output[abs_idx] == 0:
+                    output[abs_idx] = b
+                else:
+                    old = output[abs_idx]
+                    for seg_j, e in enumerate(segments[:seg_i]):
+                        prev_seg, prev_off = e
+                        if abs_idx < prev_off or abs_idx >= prev_off + len(prev_seg):
+                            continue
+                        j = abs_idx - prev_off
+                        if old == prev_seg[abs_idx - prev_off]:
+                            break
+                    raise BufferError(
+                        f'Conflicting value '
+                        f'structs[{seg_j}][{j}] = {old:#x} '
+                        f'and structs[{seg_i}][{i}] = {b:#x} '
+                        f'when overlapping'
+                    )
+
+    return bytes(output)

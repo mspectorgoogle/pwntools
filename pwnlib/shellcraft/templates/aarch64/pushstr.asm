@@ -1,6 +1,5 @@
 <% from pwnlib.util import lists, packing, fiddling %>
 <% from pwnlib import shellcraft %>
-<% import six %>
 <%page args="string, append_null = True, register1='x14', register2='x15', pretty=None"/>
 <%docstring>
 Pushes a string onto the stack.
@@ -30,13 +29,15 @@ Examples:
     b'Hello, world! This is a long string! Wow!'
 </%docstring>
 <%
-if isinstance(string, six.text_type):
+if isinstance(string, str):
     string = string.encode('utf-8')
 
 if append_null and not string.endswith(b'\x00'):
     string += b'\x00'
 
 pretty_string = pretty or shellcraft.pretty(string)
+if len(pretty_string) > 1000:
+    pretty_string = pretty_string[:1000] + '...'
 
 while len(string) % 8:
     string += b'\x00'

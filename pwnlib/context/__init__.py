@@ -1,22 +1,20 @@
-# -*- coding: utf-8 -*-
 """
 Implements context management so that nested/scoped contexts and threaded
 contexts work properly and as expected.
 """
-from __future__ import absolute_import
-from __future__ import division
-
+import atexit
 import collections
+import errno
 import functools
 import logging
 import os
+import os.path
 import platform
-import six
+import shutil
 import socket
-import stat
 import string
-import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -26,16 +24,13 @@ from pwnlib.config import register_config
 from pwnlib.device import Device
 from pwnlib.timeout import Timeout
 
-try:
-    from collections.abc import Iterable
-except ImportError:
-    from collections import Iterable
+from collections.abc import Iterable
 
 __all__ = ['context', 'ContextType', 'Thread']
 
 _original_socket = socket.socket
 
-class _devnull(object):
+class _devnull:
     name = None
     def write(self, *a, **kw): pass
     def read(self, *a, **kw):  return ''
@@ -46,7 +41,7 @@ class _defaultdict(dict):
     """
     Dictionary which loads missing keys from another dictionary.
 
-    This is neccesary because the ``default_factory`` method of
+    This is necessary because the ``default_factory`` method of
     :class:`collections.defaultdict` does not provide the key.
 
     Examples:
@@ -82,7 +77,7 @@ class _defaultdict(dict):
     def __missing__(self, key):
         return self.default[key]
 
-class _DictStack(object):
+class _DictStack:
     """
     Manages a dictionary-like object, permitting saving and restoring from
     a stack of states via :func:`push` and :func:`pop`.
@@ -271,7 +266,7 @@ def _longest(d):
     """
     return collections.OrderedDict((k,d[k]) for k in sorted(d, key=len, reverse=True))
 
-class ContextType(object):
+class ContextType:
     r"""
     Class for specifying information about the target machine.
     Intended for use as a pseudo-singleton through the global
@@ -280,7 +275,7 @@ class ContextType(object):
 
     The context is usually specified at the top of the Python file for clarity. ::
 
-        #!/usr/bin/env python
+        #!/usr/bin/env python3
         context.update(arch='i386', os='linux')
 
     Currently supported properties and their defaults are listed below.
@@ -299,12 +294,16 @@ class ContextType(object):
         >>> context.os == 'linux'
         True
         >>> context.arch = 'arm'
-        >>> vars(context) == {'arch': 'arm', 'bits': 32, 'endian': 'little', 'os': 'linux'}
+        >>> vars(context) == {'arch': 'arm', 'bits': 32, 'endian': 'little', 'os': 'linux', 'newline': b'\n'}
         True
         >>> context.endian
         'little'
         >>> context.bits
         32
+
+    .. doctest::
+        :options: +POSIX +TODO
+
         >>> def nop():
         ...   print(enhex(pwnlib.asm.asm('nop')))
         >>> nop()
@@ -337,7 +336,7 @@ class ContextType(object):
     __slots__ = '_tls',
 
     #: Default values for :class:`pwnlib.context.ContextType`
-    defaults = {
+    defaults: dict[str, object] = {
         'adb_host': 'localhost',
         'adb_port': 5037,
         'arch': 'i386',
@@ -345,20 +344,32 @@ class ContextType(object):
         'binary': None,
         'bits': 32,
         'buffer_size': 4096,
+        'cache_dir_base': os.environ.get(
+            'XDG_CACHE_HOME',
+            os.path.join(os.path.expanduser('~'), '.cache')
+        ),
         'cyclic_alphabet': string.ascii_lowercase.encode(),
         'cyclic_size': 4,
         'delete_corefiles': False,
+        'disable_corefiles': False,
         'device': os.getenv('ANDROID_SERIAL', None) or None,
         'encoding': 'auto',
         'endian': 'little',
         'gdbinit': "",
+        'gdb_binary': "",
+        'windbg_binary': "",
+        'windbgx_binary': "",
+        'x64dbg_binary': "",
+        'debugger': "auto",
         'kernel': None,
+        'local_libcdb': "/var/lib/libc-database",
         'log_level': logging.INFO,
         'log_file': _devnull(),
         'log_console': sys.stdout,
         'randomize': False,
         'rename_corefiles': True,
         'newline': b'\n',
+        'throw_eof_on_incomplete_line': None,
         'noptrace': False,
         'os': 'linux',
         'proxy': None,
@@ -368,8 +379,19 @@ class ContextType(object):
         'timeout': Timeout.maximum,
     }
 
-    #: Valid values for :meth:`pwnlib.context.ContextType.os`
-    oses = sorted(('linux','freebsd','windows','cgc','android','baremetal'))
+    unix_like    = {'newline': b'\n'}
+    windows_like = {'newline': b'\r\n'}
+
+    #: Keys are valid values for :meth:`pwnlib.context.ContextType.os`
+    oses = _longest({
+        'linux':     unix_like,
+        'freebsd':   unix_like,
+        'windows':   windows_like,
+        'cgc':       unix_like,
+        'android':   unix_like,
+        'baremetal': unix_like,
+        'darwin':    unix_like,
+    })
 
     big_32    = {'endian': 'big', 'bits': 32}
     big_64    = {'endian': 'big', 'bits': 64}
@@ -397,7 +419,9 @@ class ContextType(object):
         'msp430':    little_16,
         'powerpc':   big_32,
         'powerpc64': big_64,
-        'riscv':     little_32,
+        'riscv32':   little_32,
+        'riscv64':   little_64,
+        'loongarch64':   little_64,
         's390':      big_32,
         'sparc':     big_32,
         'sparc64':   big_64,
@@ -426,6 +450,9 @@ class ContextType(object):
 
     valid_signed = sorted(signednesses)
 
+    #: Valid values for :attr:`debugger`
+    debugger_choices = ['auto', 'gdb', 'windbgx', 'windbg', 'x64dbg']
+
     def __init__(self, **kwargs):
         """
         Initialize the ContextType structure.
@@ -437,14 +464,14 @@ class ContextType(object):
 
 
     def copy(self):
-        """copy() -> dict
+        r"""copy() -> dict
         Returns a copy of the current context as a dictionary.
 
         Examples:
 
             >>> context.clear()
             >>> context.os   = 'linux'
-            >>> vars(context) == {'os': 'linux'}
+            >>> vars(context) == {'os': 'linux', 'newline': b'\n'}
             True
         """
         return self._tls.copy()
@@ -523,7 +550,7 @@ class ContextType(object):
             >>> print(context.timeout)
             1.0
         """
-        class LocalContext(object):
+        class LocalContext:
             def __enter__(a):
                 self._tls.push()
                 self.update(**{k:v for k,v in kwargs.items() if v is not None})
@@ -573,9 +600,9 @@ class ContextType(object):
             ...         log.debug("DEBUG")
             ...         log.info("INFO")
             ...         log.warn("WARN")
-            [DEBUG] DEBUG
-            [*] INFO
-            [!] WARN
+            [...] DEBUG
+            [...] INFO
+            [...] WARN
         """
         level = 'error'
         if context.log_level <= logging.DEBUG:
@@ -643,7 +670,7 @@ class ContextType(object):
             information is printed.
 
             >>> with context.verbose: func()
-            [DEBUG] Hello
+            [...] Hello
 
         """
         return self.local(log_level='debug')
@@ -762,12 +789,17 @@ class ContextType(object):
         # We have to make sure that x86_64 appears before x86 for this to work correctly.
         transform = [('ppc64', 'powerpc64'),
                      ('ppc', 'powerpc'),
+                     ('x86-64', 'amd64'),
                      ('x86_64', 'amd64'),
                      ('x86', 'i386'),
                      ('i686', 'i386'),
                      ('armv7l', 'arm'),
                      ('armeabi', 'arm'),
-                     ('arm64', 'aarch64')]
+                     ('arm64', 'aarch64'),
+                     ('rv32', 'riscv32'),
+                     ('rv64', 'riscv64'),
+                     ('loong64', 'loongarch64'),
+                     ('la64', 'loongarch64')]
         for k, v in transform:
             if arch.startswith(k):
                 arch = v
@@ -776,7 +808,7 @@ class ContextType(object):
         try:
             defaults = self.architectures[arch]
         except KeyError:
-            raise AttributeError('AttributeError: arch must be one of %r' % sorted(self.architectures))
+            raise AttributeError('AttributeError: arch (%r) must be one of %r' % (arch, sorted(self.architectures)))
 
         for k,v in defaults.items():
             if k not in self._tls:
@@ -819,6 +851,7 @@ class ContextType(object):
         The default value is ``32``, but changes according to :attr:`arch`.
 
         Examples:
+
             >>> context.clear()
             >>> context.bits == 32
             True
@@ -844,6 +877,9 @@ class ContextType(object):
         Data type is a :class:`pwnlib.elf.ELF` object.
 
         Examples:
+
+        .. doctest::
+            :options: +POSIX +TODO
 
             >>> context.clear()
             >>> context.arch, context.bits
@@ -1007,8 +1043,10 @@ class ContextType(object):
             >>> open(bar_txt).readlines()[-1] #doctest: +ELLIPSIS
             '...:DEBUG:...:Hello from bar!\n'
         """
-        if isinstance(value, (bytes, six.text_type)):
+        if isinstance(value, (bytes, str)):
             # check if mode was specified as "[value],[mode]"
+            from pwnlib.util.packing import _need_text
+            value = _need_text(value)
             if ',' not in value:
                 value += ',a'
             filename, mode = value.rsplit(',', 1)
@@ -1051,7 +1089,7 @@ class ContextType(object):
             >>> context.log_level = 'warn'
             >>> log.warn("Hello")
             [!] Hello
-            >>> context.log_console=open('/dev/null', 'w')
+            >>> context.log_console=open(os.devnull, 'w')
             >>> log.warn("Hello")
             >>> context.clear()
         """
@@ -1059,31 +1097,105 @@ class ContextType(object):
             stream = open(stream, 'wt')
         return stream
 
+    @_validator
+    def local_libcdb(self, path):
+        """
+        Sets path to local libc-database, get more information for libc-database:
+        https://github.com/niklasb/libc-database
+
+        Works in :attr:`pwnlib.libcdb` when searching by local database provider.
+
+        The default value is ``/var/lib/libc-database``.
+
+        Sets `context.local_libcdb` to empty string or `None` will turn off local libc-database integration.
+
+        Examples:
+
+            >>> context.local_libcdb = pwnlib.data.elf.path
+            >>> context.local_libcdb = 'foobar'
+            Traceback (most recent call last):
+            ...
+            AttributeError: 'foobar' does not exist, please download libc-database first
+        """
+
+        if not os.path.isdir(path):
+            raise AttributeError("'%s' does not exist, please download libc-database first" % path)
+
+        return path
+
     @property
     def mask(self):
         return (1 << self.bits) - 1
 
     @_validator
     def os(self, os):
-        """
+        r"""
         Operating system of the target machine.
 
         The default value is ``linux``.
 
         Allowed values are listed in :attr:`pwnlib.context.ContextType.oses`.
 
+        Side Effects:
+
+            If an os is specified some attributes will be set on the context
+            if a user has not already set a value.
+
+            The following property may be modified:
+
+            - :attr:`newline`
+
+        Raises:
+            AttributeError: An invalid os was specified
+
         Examples:
 
-            >>> context.os = 'linux'
+            >>> context.clear()
+            >>> context.os == 'linux' # Default os
+            True
+
+            >>> context.os = 'freebsd'
+            >>> context.os == 'freebsd'
+            True
+
             >>> context.os = 'foobar' #doctest: +ELLIPSIS
             Traceback (most recent call last):
             ...
             AttributeError: os must be one of ['android', 'baremetal', 'cgc', 'freebsd', 'linux', 'windows']
+
+            >>> context.clear()
+            >>> context.newline == b'\n' # Default value
+            True
+            >>> context.os = 'windows'
+            >>> context.newline == b'\r\n' # New value
+            True
+
+            Note that expressly setting :attr:`newline` means that we use
+            that value instead of the default
+
+            >>> context.clear()
+            >>> context.newline = b'\n'
+            >>> context.os = 'windows'
+            >>> context.newline == b'\n'
+            True
+
+            Setting the os can override the default for :attr:`newline`
+
+            >>> context.clear()
+            >>> context.os = 'windows'
+            >>> vars(context) == {'os': 'windows', 'newline': b'\r\n'}
+            True
         """
         os = os.lower()
 
-        if os not in self.oses:
-            raise AttributeError("os must be one of %r" % self.oses)
+        try:
+            defaults = self.oses[os]
+        except KeyError:
+            raise AttributeError("os must be one of %r" % sorted(self.oses))
+
+        for k,v in defaults.items():
+            if k not in self._tls:
+                self._tls[k] = v
 
         return os
 
@@ -1148,8 +1260,14 @@ class ContextType(object):
         Default terminal used by :meth:`pwnlib.util.misc.run_in_new_terminal`.
         Can be a string or an iterable of strings.  In the latter case the first
         entry is the terminal and the rest are default arguments.
+        
+        Note:
+            :meth:`pwnlib.util.misc.run_in_new_terminal` has special handlers for
+            supported terminals with windowing capabilities, which might apply
+            to terminals set with this context option. See its documentation
+            for additional information on this behavior.
         """
-        if isinstance(value, (bytes, six.text_type)):
+        if isinstance(value, (bytes, str)):
             return [value]
         return value
 
@@ -1230,7 +1348,7 @@ class ContextType(object):
     def device(self, device):
         """Sets the device being operated on.
         """
-        if isinstance(device, (bytes, six.text_type)):
+        if isinstance(device, (bytes, str)):
             device = Device(device)
         if isinstance(device, Device):
             self.arch = device.arch or self.arch
@@ -1272,12 +1390,30 @@ class ContextType(object):
         """
         return int(size)
 
+    @_validator
+    def cache_dir_base(self, new_base):
+        """Base directory to use for caching content.
+
+        Changing this to a different value will clear the :attr:`cache_dir` path
+        stored in TLS since a new path will need to be generated to respect the
+        new :attr:`cache_dir_base` value.
+        """
+
+        if new_base != self.cache_dir_base:
+            del self._tls["cache_dir"]
+        if os.access(new_base, os.F_OK) and not os.access(new_base, os.W_OK):
+            raise OSError(errno.EPERM, "Cache base dir is not writable")
+        return new_base
+
     @property
     def cache_dir(self):
         """Directory used for caching data.
 
         Note:
             May be either a path string, or :const:`None`.
+            Set to :const:`None` to disable caching.
+            Set to :const:`True` to generate the default cache directory path
+            based on :attr:`cache_dir_base` again.
 
         Example:
 
@@ -1285,38 +1421,85 @@ class ContextType(object):
             >>> cache_dir is not None
             True
             >>> os.chmod(cache_dir, 0o000)
-            >>> context.cache_dir is None
+            >>> context.cache_dir = True
+            >>> context.cache_dir is None # doctest: +POSIX +TODO
             True
             >>> os.chmod(cache_dir, 0o755)
             >>> cache_dir == context.cache_dir
             True
+            >>> context.cache_dir = None
+            >>> context.cache_dir is None
+            True
+            >>> context.cache_dir = True
+            >>> context.cache_dir is not None
+            True
         """
-        xdg_cache_home = os.environ.get('XDG_CACHE_HOME') or \
-                         os.path.join(os.path.expanduser('~'), '.cache')
+        try:
+            # If the TLS already has a cache directory path, we return it
+            # without any further checks since it must have been valid when it
+            # was set and if that has changed, hiding the TOCTOU here would be
+            # potentially confusing
+            return self._tls["cache_dir"]
+        except KeyError:
+            pass
 
-        if not os.access(xdg_cache_home, os.W_OK):
+        # Attempt to create a Python version specific cache dir and its parents
+        cache_dirname = '.pwntools-cache-%d.%d' % sys.version_info[:2]
+        cache_dirpath = os.path.join(self.cache_dir_base, cache_dirname)
+        try:
+            os.makedirs(cache_dirpath)
+        except OSError as exc:
+            # If we failed for any reason other than the cache directory
+            # already existing then we'll fall back to a temporary directory
+            # object which doesn't respect the `cache_dir_base`
+            if exc.errno != errno.EEXIST:
+                try:
+                    cache_dirpath = tempfile.mkdtemp(prefix=".pwntools-tmp")
+                except IOError:
+                    # This implies no good candidates for temporary files so we
+                    # have to return `None`
+                    return None
+                else:
+                    # Ensure the temporary cache dir is cleaned up on exit. A
+                    # `TemporaryDirectory` would do this better upon garbage
+                    # collection but this is necessary for Python 2 support.
+                    atexit.register(shutil.rmtree, cache_dirpath)
+        # By this time we have a cache directory which exists but we don't know
+        # if it is actually writable. Some wargames e.g. pwnable.kr have
+        # created dummy directories which cannot be modified by the user
+        # account (owned by root).
+        if os.access(cache_dirpath, os.W_OK):
+            # Stash this in TLS for later reuse
+            self._tls["cache_dir"] = cache_dirpath
+            return cache_dirpath
+        else:
             return None
 
-        cache = os.path.join(xdg_cache_home, '.pwntools-cache-%d.%d' % sys.version_info[:2])
-
-        if not os.path.exists(cache):
-            try:
-                os.mkdir(cache)
-            except OSError:
-                return None
-
-        # Some wargames e.g. pwnable.kr have created dummy directories
-        # which cannot be modified by the user account (owned by root).
-        if not os.access(cache, os.W_OK):
-            return None
-
-        return cache
+    @cache_dir.setter
+    def cache_dir(self, v):
+        if v is True:
+            del self._tls["cache_dir"]
+        elif v is None or os.access(v, os.W_OK):
+            # Stash this in TLS for later reuse
+            self._tls["cache_dir"] = v
 
     @_validator
     def delete_corefiles(self, v):
         """Whether pwntools automatically deletes corefiles after exiting.
         This only affects corefiles accessed via :attr:`.process.corefile`.
 
+        Default value is ``False``.
+        """
+        return bool(v)
+
+    @_validator
+    def disable_corefiles(self, v):
+        """Whether pwntools automatically disable corefiles generation.
+
+        When enabled, sets RLIMIT_CORE to (0,-1) to prevent core dump creation
+        entirely, which is useful for brute-force scenarios and repeated segfault
+        crashes where core files consume excessive disk space 
+        
         Default value is ``False``.
         """
         return bool(v)
@@ -1349,6 +1532,25 @@ class ContextType(object):
         from pwnlib.util.packing import _need_bytes
         return _need_bytes(v)
 
+    @_validator
+    def throw_eof_on_incomplete_line(self, v):
+        """Whether to raise an :class:`EOFError` if an EOF is received before a newline in ``tube.recvline``.
+
+        Controls if an :class:`EOFError` is treated as newline in ``tube.recvline`` and similar functions
+        and whether a warning should be logged about it.
+
+        Possible values are:
+
+        - ``True``: Raise an :class:`EOFError` if an EOF is received before a newline.
+        - ``False``: Return the data received so far if an EOF is received
+          before a newline without logging a warning.
+        - ``None``: Return the data received so far if an EOF is received
+          before a newline and log a warning.
+
+        Default value is ``None``.
+        """
+        return v if v is None else bool(v)
+
 
     @_validator
     def gdbinit(self, value):
@@ -1364,6 +1566,92 @@ class ContextType(object):
 
         Default value is ``""``.
         """
+        return str(value)
+
+    @_validator
+    def gdb_binary(self, value):
+        """Path to the binary that is used when running GDB locally.
+
+        This is useful when you have multiple versions of gdb installed or the gdb binary is
+        called something different.
+
+        If set to an empty string, pwntools will try to search for a reasonable gdb binary from 
+        the path.
+
+        Default value is ``""``.
+        """
+        return str(value)
+
+    @_validator
+    def windbg_binary(self, value):
+        r"""Path to the binary that is used when running WinDbg locally.
+
+        This is useful when you have multiple versions of WinDbg installed or the WinDbg binary is
+        called something different.
+
+        Usually, it is installed to ``C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe``.
+        Adding the path to the Windows SDK to your PATH variable is recommended.
+
+        If set to an empty string, pwntools will try to search for a reasonable WinDbg binary from 
+        the path.
+
+        Default value is ``""``.
+        """
+        return str(value)
+
+    @_validator
+    def windbgx_binary(self, value):
+        r"""Path to the binary that is used when running WinDbgX locally.
+
+        This is useful when you have multiple versions of WinDbgX installed or the WinDbgX binary is
+        called something different.
+
+        Usually, it is installed to ``%LocalAppData%\Microsoft\WindowsApps\WinDbgX.exe``.
+
+        If set to an empty string, pwntools will try to search for a reasonable WinDbgX binary from 
+        the path.
+
+        Default value is ``""``.
+        """
+        return str(value)
+
+    @_validator
+    def x64dbg_binary(self, value):
+        r"""Path to the binary that is used when running x64dbg locally.
+
+        Should be set to the x96dbg.exe launcher binary to handle 32-bit and 64-bit binaries.
+
+        This is useful when you have multiple versions of x64dbg installed or the x64dbg binary is
+        called something different.
+
+        If set to an empty string, pwntools will try to search for a reasonable x64dbg binary from 
+        the path or based on the ``"Debug with x64dbg"`` shell extension if available.
+
+        Default value is ``""``.
+        """
+        return str(value)
+
+    @_validator
+    def debugger(self, value):
+        """Type of debugger to use when running locally.
+
+        Possible values are:
+
+        - ``auto``: Automatically select the available debugger.
+        - ``gdb``: Use GDB as the debugger.
+        - ``windbg``: Use WinDbg as the debugger.
+        - ``windbgx``: Use WinDbgX as the debugger.
+        - ``x64dbg``: Use x64dbg as the debugger.
+
+        Defaults to ``windbgx`` on Windows and ``gdb`` on other platforms.
+
+        ``auto``: Automatically select the available debugger based on the platform.
+        On Windows, it will prefer ``windbgx`` over ``windbg`` if both are available.
+        
+        Default value is ``"auto"``.
+        """
+        if value not in self.debugger_choices:
+            raise AttributeError("debugger must be one of %r" % sorted(self.debugger_choices))
         return str(value)
 
     @_validator
@@ -1397,7 +1685,7 @@ class ContextType(object):
         from pwnlib.tubes.ssh import ssh
 
         if not isinstance(shell, ssh):
-            raise AttributeError("context.ssh_session must be an ssh tube") 
+            raise AttributeError("context.ssh_session must be an ssh tube")
 
         return shell
 
@@ -1492,7 +1780,7 @@ if 'ANDROID_ADB_SERVER_HOST' in os.environ:
     context.adb_host = os.environ.get('ANDROID_ADB_SERVER_HOST')
 
 if 'ANDROID_ADB_SERVER_PORT' in os.environ:
-    context.adb_port = int(os.getenv('ANDROID_ADB_SERVER_PORT'))
+    context.adb_port = int(os.environ.get('ANDROID_ADB_SERVER_PORT', 5037))
 
 def LocalContext(function):
     """
@@ -1560,7 +1848,7 @@ def update_context_defaults(section):
 
         default = ContextType.defaults[key]
 
-        if isinstance(default, six.string_types + six.integer_types + (tuple, list, dict)):
+        if isinstance(default, (str, int, float, tuple, list, dict)):
             value = safeeval.expr(value)
         else:
             log.warn("Unsupported configuration option %r in section %r" % (key, 'context'))

@@ -1,21 +1,23 @@
-from __future__ import division
-
+import json
 import base64
 import errno
 import os
 import re
 import signal
-import six
 import socket
 import stat
 import string
 import subprocess
 import sys
 import tempfile
+import inspect
+import time
+import types
 
 from pwnlib import atexit
 from pwnlib.context import context
 from pwnlib.log import getLogger
+from pwnlib.timeout import Timeout
 from pwnlib.util import fiddling
 from pwnlib.util import lists
 from pwnlib.util import packing
@@ -28,6 +30,7 @@ def align(alignment, x):
     Rounds `x` up to nearest multiple of the `alignment`.
 
     Example:
+
       >>> [align(5, n) for n in range(15)]
       [0, 5, 5, 5, 5, 5, 10, 10, 10, 10, 10, 15, 15, 15, 15]
     """
@@ -40,6 +43,7 @@ def align_down(alignment, x):
     Rounds `x` down to nearest multiple of the `alignment`.
 
     Example:
+
         >>> [align_down(5, n) for n in range(15)]
         [0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 10, 10, 10, 10, 10]
     """
@@ -47,13 +51,14 @@ def align_down(alignment, x):
 
 
 def binary_ip(host):
-    """binary_ip(host) -> str
+    r"""binary_ip(host) -> str
 
     Resolve host and return IP as four byte string.
 
     Example:
+
         >>> binary_ip("127.0.0.1")
-        b'\\x7f\\x00\\x00\\x01'
+        b'\x7f\x00\x00\x01'
     """
     return socket.inet_aton(socket.gethostbyname(host))
 
@@ -69,6 +74,7 @@ def size(n, abbrev = 'B', si = False):
       abbrev(str): String appended to the size, defaults to ``'B'``.
 
     Example:
+
         >>> size(451)
         '451B'
         >>> size(1000)
@@ -114,7 +120,8 @@ def read(path, count=-1, skip=0):
     Open file, return content.
 
     Examples:
-        >>> read('/proc/self/exe')[:4]
+
+        >>> read('/proc/self/exe')[:4] # doctest: +LINUX +TODO
         b'\x7fELF'
     """
     path = os.path.expanduser(os.path.expandvars(path))
@@ -139,6 +146,7 @@ def which(name, all = False, path=None):
 
     Works as the system command ``which``; searches $PATH for ``name`` and
     returns a full path if found.
+    Tries all of the file extensions in $PATHEXT on Windows too.
 
     If `all` is :const:`True` the set of all found locations is returned, else
     the first occurrence or :const:`None` is returned.
@@ -153,33 +161,44 @@ def which(name, all = False, path=None):
 
     Example:
 
-        >>> which('sh') # doctest: +ELLIPSIS
+        >>> which('sh') # doctest: +ELLIPSIS +POSIX
         '.../bin/sh'
+        >>> which('cmd') # doctest: +ELLIPSIS +WINDOWS
+        '...\\cmd.EXE'
     """
     # If name is a path, do not attempt to resolve it.
     if os.path.sep in name:
         return name
 
-    isroot = os.getuid() == 0
+    if sys.platform == 'win32':
+        pathexts = os.environ.get('PATHEXT', '').split(os.pathsep)
+        isroot = False
+    else:
+        pathexts = []
+        isroot = os.getuid() == 0
+    pathexts = [''] + pathexts
     out = set()
     try:
         path = path or os.environ['PATH']
     except KeyError:
         log.exception('Environment variable $PATH is not set')
-    for p in path.split(os.pathsep):
-        p = os.path.join(p, name)
-        if os.access(p, os.X_OK):
-            st = os.stat(p)
-            if not stat.S_ISREG(st.st_mode):
-                continue
-            # work around this issue: https://bugs.python.org/issue9311
-            if isroot and not \
-              st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                continue
-            if all:
-                out.add(p)
-            else:
-                return p
+    for path_part in path.split(os.pathsep):
+        for ext in pathexts:
+            nameext = name + ext
+            p = os.path.join(path_part, nameext)
+            if os.access(p, os.X_OK):
+                st = os.stat(p)
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                # work around this issue: https://bugs.python.org/issue9311
+                if isroot and not \
+                st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                    continue
+                if all:
+                    out.add(p)
+                    break
+                else:
+                    return p
     if all:
         return out
     else:
@@ -194,13 +213,13 @@ def normalize_argv_env(argv, env, log, level=2):
     # - Each string must not contain '\x00'
     #
     argv = argv or []
-    if isinstance(argv, (six.text_type, six.binary_type)):
+    if isinstance(argv, (str, bytes, bytearray)):
         argv = [argv]
 
     if not isinstance(argv, (list, tuple)):
         log.error('argv must be a list or tuple: %r' % argv)
 
-    if not all(isinstance(arg, (six.text_type, bytes, bytearray)) for arg in argv):
+    if not all(isinstance(arg, (str, bytes, bytearray)) for arg in argv):
         log.error("argv must be strings or bytes: %r" % argv)
 
     # Create a duplicate so we can modify it
@@ -227,9 +246,13 @@ def normalize_argv_env(argv, env, log, level=2):
         env_items = env
     if env:
         for k,v in env_items:
-            if not isinstance(k, (bytes, six.text_type)):
+            if not isinstance(k, (bytes, str)):
                 log.error('Environment keys must be strings: %r' % k)
-            if not isinstance(k, (bytes, six.text_type)):
+            # Check if = is in the key, Required check since we sometimes call ctypes.execve directly
+            # https://github.com/python/cpython/blob/025995feadaeebeef5d808f2564f0fd65b704ea5/Modules/posixmodule.c#L6476
+            if b'=' in packing._encode(k):
+                log.error('Environment keys may not contain "=": %r' % (k))
+            if not isinstance(v, (bytes, str)):
                 log.error('Environment values must be strings: %r=%r' % (k,v))
             k = packing._need_bytes(k, level, 0x80)  # ASCII text is okay
             v = packing._need_bytes(v, level, 0x80)  # ASCII text is okay
@@ -258,9 +281,24 @@ def run_in_new_terminal(command, terminal=None, args=None, kill_at_exit=True, pr
         - If ``$TERM_PROGRAM`` is set, that is used.
         - If X11 is detected (by the presence of the ``$DISPLAY`` environment
           variable), ``x-terminal-emulator`` is used.
+        - If kitty is detected (by the presence of the ``$KITTY_PID`` environment
+          variable), a new kitty window will be opened.
+        - If Terminator is detected (by the presence of the ``$TERMINATOR_UUID``
+          environment variable), a new terminator window will be opened.
+        - If GNOME Terminal is detected (by the presence of the ``$GNOME_TERMINAL_SCREEN``
+          and ``$GNOME_TERMINAL_SERVICE`` environment variables), a new GNOME
+          Terminal will be opened.
+        - If Alacritty is detected (by the presence of the ``$ALACRITTY_SOCKET``
+          and ``$ALACRITTY_WINDOW_ID`` environment variables), Alacritty is used.
+        - If Tilix is detected (by the presence of the ``$TILIX_ID`` environment
+          variable), a new pane is split.
+        - If KDE Konsole is detected (by the presence of the ``$KONSOLE_VERSION``
+          environment variable), a terminal will be split.
         - If WSL (Windows Subsystem for Linux) is detected (by the presence of
           a ``wsl.exe`` binary in the ``$PATH`` and ``/proc/sys/kernel/osrelease``
           containing ``Microsoft``), a new ``cmd.exe`` window will be opened.
+        - If zellij is detected (by the presence of the ``$ZELLIJ`` environment
+          variable), a new screen will be opened.`)
 
     If `kill_at_exit` is :const:`True`, try to close the command/terminal when the
     current process exits. This may not work for all terminal types.
@@ -272,8 +310,12 @@ def run_in_new_terminal(command, terminal=None, args=None, kill_at_exit=True, pr
         kill_at_exit (bool): Whether to close the command/terminal on process exit.
         preexec_fn (callable): Callable to invoke before exec().
 
-    Note:
-        The command is opened with ``/dev/null`` for stdin, stdout, stderr.
+    Notes:
+        - The command is opened with ``/dev/null`` for stdin, stdout, stderr.
+        - When ``context.terminal`` is not a path and the terminal is one of the above
+          which support windowing/tiling, this will also cause the terminal to split.
+          Setting ``context.terminal`` to a path (e.g. using ``which(terminal)``)
+          bypasses this.
 
     Returns:
       PID of the new terminal process
@@ -288,23 +330,94 @@ def run_in_new_terminal(command, terminal=None, args=None, kill_at_exit=True, pr
         elif 'TMUX' in os.environ and which('tmux'):
             terminal = 'tmux'
             args     = ['splitw']
+        elif 'ZELLIJ' in os.environ and which('zellij'):
+            terminal = 'zellij'
+            args = ['action', 'new-pane'] + ['-c'] * kill_at_exit + ['--']
         elif 'STY' in os.environ and which('screen'):
             terminal = 'screen'
             args     = ['-t','pwntools-gdb','bash','-c']
-        elif 'TERM_PROGRAM' in os.environ:
+        elif 'TERM_PROGRAM' in os.environ and os.environ['TERM_PROGRAM'] == "iTerm.app" and which('osascript'):
+            # if we're on a mac, and using iTerm
+            terminal = "osascript"
+            args     = []
+        elif 'TERM_PROGRAM' in os.environ and which(os.environ['TERM_PROGRAM']):
             terminal = os.environ['TERM_PROGRAM']
             args     = []
         elif 'DISPLAY' in os.environ and which('x-terminal-emulator'):
             terminal = 'x-terminal-emulator'
             args     = ['-e']
+        elif 'KITTY_PID' in os.environ and which('kitty') and which('kitten'):
+            terminal = 'kitten'
+            args = ['@', 'launch', '--copy-env', '--cwd', 'current']
+        elif 'TERMINATOR_UUID' in os.environ and which('terminator'):
+            if which('remotinator'):
+                terminal = 'remotinator'
+                args = ['vsplit', '-x']
+            else:
+                terminal = 'terminator'
+                args = ['-e']
+        elif "GNOME_TERMINAL_SCREEN" in os.environ and "GNOME_TERMINAL_SERVICE" in os.environ and which("gnome-terminal"):
+            terminal = 'gnome-terminal'
+            args     = ['-e']
+        elif "ALACRITTY_SOCKET" in os.environ and "ALACRITTY_WINDOW_ID" in os.environ and which("alacritty"):
+            terminal = 'alacritty'
+            args     = ['-e']
+        elif "TILIX_ID" in os.environ and which("tilix"):
+            terminal = "tilix"
+            args     = ['-a', 'session-add-right', '-e']
+        elif 'KONSOLE_VERSION' in os.environ and which('qdbus'):
+            qdbus = which('qdbus')
+            window_id = os.environ['WINDOWID']
+            konsole_dbus_service = os.environ['KONSOLE_DBUS_SERVICE']
+
+            with subprocess.Popen((qdbus, konsole_dbus_service), stdout=subprocess.PIPE) as proc:
+                lines = proc.communicate()[0].decode().split('\n')
+
+            # Iterate over all MainWindows
+            for line in lines:
+                parts = line.split('/')
+                if len(parts) == 3 and parts[2].startswith('MainWindow_'):
+                    name = parts[2]
+                    with subprocess.Popen((qdbus, konsole_dbus_service, '/konsole/' + name,
+                                           'org.kde.KMainWindow.winId'), stdout=subprocess.PIPE) as proc:
+                        target_window_id = proc.communicate()[0].decode().strip()
+                        if target_window_id == window_id:
+                            break
+            else:
+                log.error('MainWindow not found')
+
+            # Split
+            subprocess.run((qdbus, konsole_dbus_service, '/konsole/' + name,
+                            'org.kde.KMainWindow.activateAction', 'split-view-left-right'), stdout=subprocess.DEVNULL)
+
+            # Find new session
+            with subprocess.Popen((qdbus, konsole_dbus_service, os.environ['KONSOLE_DBUS_WINDOW'],
+                                   'org.kde.konsole.Window.sessionList'), stdout=subprocess.PIPE) as proc:
+                session_list = map(int, proc.communicate()[0].decode().split())
+            last_konsole_session = max(session_list)
+
+            terminal = 'qdbus'
+            args = [konsole_dbus_service, '/Sessions/{}'.format(last_konsole_session),
+                    'org.kde.konsole.Session.runCommand']
+
         else:
             is_wsl = False
             if os.path.exists('/proc/sys/kernel/osrelease'):
                 with open('/proc/sys/kernel/osrelease', 'rb') as f:
                     is_wsl = b'icrosoft' in f.read()
             if is_wsl and which('cmd.exe') and which('wsl.exe') and which('bash.exe'):
-                terminal = 'cmd.exe'
-                args     = ['/c', 'start', 'bash.exe', '-c']
+                terminal    = 'cmd.exe'
+                args        = ['/c', 'start']
+                distro_name = os.getenv('WSL_DISTRO_NAME')
+                current_dir = os.getcwd()
+
+                # Split pane in Windows Terminal
+                if 'WT_SESSION' in os.environ and which('wt.exe'):
+                    args.extend(['wt.exe', '-w', '0', 'split-pane'])
+                if distro_name:
+                    args.extend(['wsl.exe', '-d', distro_name, '--cd', current_dir, 'bash', '-c'])
+                else:
+                    args.extend(['bash.exe', '-c'])
 
     if not terminal:
         log.error('Could not find a terminal binary to use. Set context.terminal to your terminal.')
@@ -320,9 +433,21 @@ def run_in_new_terminal(command, terminal=None, args=None, kill_at_exit=True, pr
     if terminal == 'tmux':
         args += ['-F' '#{pane_pid}', '-P']
 
+    if terminal == "kitty":
+        if not args:
+            # Likely the average user just wanted to tell pwntools to use kitty, rather than
+            # thinking about how the terminal will actually be invoked.
+            terminal = "kitten"
+            args = ['@', 'launch', '--copy-env', '--cwd', 'current']
+        else:
+            # Allowing this would make our life much harder (because we don't get the window id from
+            # running `kitty`, but we do from `kitten @ launch`) and it's an easy fix for the user.
+            log.error(
+                f"Invalid kitty invocation {context.terminal}, please use `kitten @ launch`.")
+            
     argv = [which(terminal)] + args
 
-    if isinstance(command, six.string_types):
+    if isinstance(command, str):
         if ';' in command:
             log.error("Cannot use commands with semicolon.  Create a script and invoke that directly.")
         argv += [command]
@@ -334,7 +459,7 @@ def run_in_new_terminal(command, terminal=None, args=None, kill_at_exit=True, pr
 import os
 os.execve({argv0!r}, {argv!r}, os.environ)
 '''
-        script = script.format(executable=sys.executable,
+        script = script.format(executable='/bin/env ' * (' ' in sys.executable) + sys.executable,
                                argv=command,
                                argv0=which(command[0]))
         script = script.lstrip()
@@ -348,24 +473,102 @@ os.execve({argv0!r}, {argv!r}, os.environ)
           argv += [tmp.name]
 
 
+    # if we're on a Mac and use iTerm, we use `osascript` to split the current window
+    # `command` was sanitized on the previous step. It is now either a string, or was written to a tmp file
+    # we run the command, which is now `argv[-1]`
+    if terminal == 'osascript':
+        osa_script = """
+tell application "iTerm"
+    tell current session of current window
+        set newSession to (split horizontally with default profile)
+    end tell
+    tell newSession
+        write text "{}"
+    end tell
+end tell
+""".format(argv[-1])
+        with tempfile.NamedTemporaryFile(delete=False, mode='wt+') as tmp:
+            tmp.write(osa_script.lstrip())
+            tmp.flush()
+            os.chmod(tmp.name, 0o700)
+            argv = [which(terminal), tmp.name]
+    # cmd.exe does not support WSL UNC paths as working directory
+    # so it gets reset to %WINDIR% before starting wsl again.
+    # Set the working directory correctly in WSL.
+    elif terminal == 'cmd.exe':
+        argv[-1] = "cd '{}' && {}".format(os.getcwd(), argv[-1])
+
     log.debug("Launching a new terminal: %r" % argv)
 
     stdin = stdout = stderr = open(os.devnull, 'r+b')
-    if terminal == 'tmux':
+    if terminal == 'tmux' or terminal == 'zellij' or terminal == 'kitten':
         stdout = subprocess.PIPE
+    if terminal == 'kitten':
+        stderr = subprocess.PIPE
 
     p = subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=stderr, preexec_fn=preexec_fn)
 
     if terminal == 'tmux':
         out, _ = p.communicate()
-        pid = int(out)
+        try:
+            pid = int(out)
+        except ValueError:
+            pid = None
+        if pid is None:
+            log.error("Could not parse PID from tmux output (%r). Start tmux first.", out)
+    elif terminal == 'qdbus':
+        with subprocess.Popen((qdbus, konsole_dbus_service, '/Sessions/{}'.format(last_konsole_session),
+                               'org.kde.konsole.Session.processId'), stdout=subprocess.PIPE) as proc:
+            pid = int(proc.communicate()[0].decode())
+    elif terminal == "kitten":
+        pid = None
+        out, err = p.communicate()
+
+        # Catch the most common user error
+        if b"Remote control is disabled" in err:
+            log.error("Kitty remote control is disabled. Add `allow_remote_control yes` to your ~/.config/kitty/kitty.conf .")
+
+        try:
+            kittyid = int(out)
+        except ValueError:
+            kittyid = None
+        if kittyid is None:
+            log.error("Could not parse kitty window ID from output (%r) (stderr: %r)", out, err)
+        else:
+            lsout, _ = subprocess.Popen(["kitten", "@", "ls", "--match", "id:%d" % kittyid], stdin=stdin, stdout=stdout, stderr=stderr).communicate()
+            try:
+                lsj = json.loads(lsout)
+                pid = int(lsj[0]["tabs"][0]["windows"][0]["pid"])
+            except json.JSONDecodeError as e:
+                pid = None
+                log.error("Json decode failed while parsing 'kitten @ ls' output (%r) (error: %r)", lsout, e)
+            
+    elif terminal == 'cmd.exe':
+        # p.pid is cmd.exe's pid instead of the WSL process we want to start eventually.
+        # I don't know how to trace the execution through Windows and back into the WSL2 VM.
+        # Do a best guess by waiting for a new process matching the command to be run.
+        # Otherwise it's better to return nothing instead of a know wrong pid.
+        from pwnlib.util.proc import pid_by_name
+        pid = None
+        ran_program = command.split(' ')[0] if isinstance(command, str) else command[0]
+        t = Timeout()
+        with t.countdown(timeout=5):
+            while t.timeout:
+                new_pid = pid_by_name(ran_program)
+                if new_pid and new_pid[0] > p.pid:
+                    pid = new_pid[0]
+                    break
+                time.sleep(0.01)
     else:
         pid = p.pid
 
-    if kill_at_exit:
+    if kill_at_exit and pid:
         def kill():
             try:
-                os.kill(pid, signal.SIGTERM)
+                if terminal == 'qdbus':
+                    os.kill(pid, signal.SIGHUP)
+                else:
+                    os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
 
@@ -382,6 +585,7 @@ def parse_ldd_output(output):
       output(str): The output to parse
 
     Example:
+
         >>> sorted(parse_ldd_output('''
         ...     linux-vdso.so.1 =>  (0x00007fffbf5fe000)
         ...     libtinfo.so.5 => /lib/x86_64-linux-gnu/libtinfo.so.5 (0x00007fe28117f000)
@@ -446,6 +650,7 @@ def register_sizes(regs, in_sizes):
     Used in i386/AMD64 shellcode, e.g. the mov-shellcode.
 
     Example:
+
         >>> regs = [['eax', 'ax', 'al', 'ah'],['ebx', 'bx', 'bl', 'bh'],
         ... ['ecx', 'cx', 'cl', 'ch'],
         ... ['edx', 'dx', 'dl', 'dh'],
@@ -548,12 +753,248 @@ def register_sizes(regs, in_sizes):
     return lists.concat(regs), sizes, bigger, smaller
 
 
-def python_2_bytes_compatible(klass):
+def _create_execve_script(argv=None, executable=None, cwd=None, env=None, which=None, ignore_environ=None,
+        stdin=0, stdout=1, stderr=2, preexec_fn=None, preexec_args=(), aslr=None, setuid=None,
+        shell=False, log=log):
     """
-    A class decorator that defines __str__ methods under Python 2.
-    Under Python 3 it does nothing.
+    Creates a python wrapper script that triggers the syscall `execve` directly.
+
+    Arguments:
+        argv(list):
+            List of arguments to pass into the process
+        executable(str):
+            Path to the executable to run.
+            If :const:`None`, ``argv[0]`` is used.
+        cwd(str):
+            Working directory.  If :const:`None`, uses the working directory specified
+            on :attr:`cwd` or set via :meth:`set_working_directory`.
+        env(dict):
+            Environment variables to add to the environment.
+        which(callable):
+            Function to find the path of a binary.
+        ignore_environ(bool):
+            Ignore default environment.  By default use default environment iff env not specified.
+        stdin(int, str):
+            If an integer, replace stdin with the numbered file descriptor.
+            If a string, a open a file with the specified path and replace
+            stdin with its file descriptor.  May also be one of ``sys.stdin``,
+            ``sys.stdout``, ``sys.stderr``.  If :const:`None`, the file descriptor is closed.
+        stdout(int, str):
+            See ``stdin``.
+        stderr(int, str):
+            See ``stdin``.
+        preexec_fn(callable):
+            Function which is executed on the remote side before execve().
+            This **MUST** be a self-contained function -- it must perform
+            all of its own imports, and cannot refer to variables outside
+            its scope.
+        preexec_args(object):
+            Argument passed to ``preexec_fn``.
+            This **MUST** only consist of native Python objects.
+        aslr(bool):
+            See :class:`pwnlib.tubes.process.process` for more information.
+        setuid(bool):
+            See :class:`pwnlib.tubes.process.process` for more information.
+        shell(bool):
+            Pass the command-line arguments to the shell.
+
+    Returns:
+        A string containing the python script.
     """
-    if six.PY2:
-        if '__str__' not in klass.__dict__:
-            klass.__str__ = klass.__bytes__
-    return klass
+    if not argv and not executable:
+        log.error("Must specify argv or executable")
+
+    if not which:
+        log.error("Must specify which_ parameter")
+
+    aslr      = aslr if aslr is not None else context.aslr
+
+    if ignore_environ is None:
+        ignore_environ = env is not None  # compat
+
+    argv, env = normalize_argv_env(argv, env, log)
+
+    if shell:
+        if len(argv) != 1:
+            log.error('Cannot provide more than 1 argument if shell=True')
+        argv = [bytearray(b'/bin/sh'), bytearray(b'-c')] + argv
+
+    executable = executable or argv[0]
+    cwd        = cwd or '.'
+
+    # Validate, since failures on the remote side will suck.
+    if not isinstance(executable, (str, bytes, bytearray)):
+        log.error("executable / argv[0] must be a string: %r" % executable)
+    executable = bytearray(packing._need_bytes(executable, min_wrong=0x80))
+
+    # Allow passing in sys.stdin/stdout/stderr objects
+    handles = {sys.stdin: 0, sys.stdout:1, sys.stderr:2}
+    stdin  = handles.get(stdin, stdin)
+    stdout = handles.get(stdout, stdout)
+    stderr = handles.get(stderr, stderr)
+
+    # Allow the user to provide a self-contained function to run
+    def func(): pass
+    func      = preexec_fn or func
+    func_args = preexec_args
+
+    if not isinstance(func, types.FunctionType):
+        log.error("preexec_fn must be a function")
+
+    func_name = func.__name__
+    if func_name == (lambda: 0).__name__:
+        log.error("preexec_fn cannot be a lambda")
+
+    func_src  = inspect.getsource(func).strip()
+    setuid = True if setuid is None else bool(setuid)
+
+    # gdbserver wrappers are freezing on first execve syscall (for debugging the wanted program).
+    # It is not related to fork&exec.
+    # `/usr/bin/env python3` overrides first execve (because env is executing python3).
+    # Resolving python3 before shebang does, for not clashing with wrapper's first execve syscall.
+    python_path = which('python3')
+    script = r"""
+#!%(python_path)s
+import os, sys, ctypes, resource, platform, stat
+from collections import OrderedDict
+try:
+    integer_types = int, long
+except NameError:
+    integer_types = int,
+exe   = bytes(%(executable)r)
+argv  = [bytes(a) for a in %(argv)r]
+env   = %(env)r
+
+os.chdir(%(cwd)r)
+
+if %(ignore_environ)r:
+    os.environ.clear()
+
+environ = getattr(os, 'environb', os.environ)
+
+if env is not None:
+    env = OrderedDict((bytes(k), bytes(v)) for k,v in env)
+    environ.update(env)
+else:
+    env = environ
+
+def is_exe(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+PATH = environ.get(b'PATH',b'').split(os.pathsep.encode())
+
+if os.path.sep.encode() not in exe and not is_exe(exe):
+    for path in PATH:
+        test_path = os.path.join(path, exe)
+        if is_exe(test_path):
+            exe = test_path
+            break
+
+if not is_exe(exe):
+    sys.stderr.write('3\n')
+    sys.stderr.write("{!r} is not executable or does not exist in $PATH: {!r}".format(exe,PATH))
+    sys.exit(-1)
+
+if not %(setuid)r:
+    PR_SET_NO_NEW_PRIVS = 38
+    result = ctypes.CDLL('libc.so.6').prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+
+    if result != 0:
+        sys.stdout.write('3\n')
+        sys.stdout.write("Could not disable setuid: prctl(PR_SET_NO_NEW_PRIVS) failed")
+        sys.exit(-1)
+
+try:
+    PR_SET_PTRACER = 0x59616d61
+    PR_SET_PTRACER_ANY = -1
+    ctypes.CDLL('libc.so.6').prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0)
+except Exception:
+    pass
+
+# Determine what UID the process will execute as
+# This is used for locating apport core dumps
+suid = os.getuid()
+sgid = os.getgid()
+st = os.stat(exe)
+if %(setuid)r:
+    if (st.st_mode & stat.S_ISUID):
+        suid = st.st_uid
+    if (st.st_mode & stat.S_ISGID):
+        sgid = st.st_gid
+
+if sys.argv[-1] == 'check':
+    sys.stdout.write("1\n")
+    sys.stdout.write(str(os.getpid()) + "\n")
+    sys.stdout.write(str(os.getuid()) + "\n")
+    sys.stdout.write(str(os.getgid()) + "\n")
+    sys.stdout.write(str(suid) + "\n")
+    sys.stdout.write(str(sgid) + "\n")
+    sys.stdout.flush()
+    getattr(sys.stdout, 'buffer', sys.stdout).write(os.path.realpath(exe) + b'\x00')
+    sys.stdout.flush()
+
+for fd, newfd in {0: %(stdin)r, 1: %(stdout)r, 2:%(stderr)r}.items():
+    if newfd is None:
+        os.close(fd)
+    elif isinstance(newfd, (str, bytes)):
+        newfd = os.open(newfd, os.O_RDONLY if fd == 0 else (os.O_RDWR|os.O_CREAT))
+        os.dup2(newfd, fd)
+        os.close(newfd)
+    elif isinstance(newfd, integer_types) and newfd != fd:
+        os.dup2(fd, newfd)
+
+if not %(aslr)r:
+    if platform.system().lower() == 'linux' and %(setuid)r is not True:
+        ADDR_NO_RANDOMIZE = 0x0040000
+        ctypes.CDLL('libc.so.6').personality(ADDR_NO_RANDOMIZE)
+
+    resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+
+# Attempt to dump ALL core file regions
+try:
+    with open('/proc/self/coredump_filter', 'w') as core_filter:
+        core_filter.write('0x3f\n')
+except Exception:
+    pass
+
+# Assume that the user would prefer to have core dumps.
+try:
+    resource.setrlimit(resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+except Exception:
+    pass
+
+%(func_src)s
+%(func_name)s(*%(func_args)r)
+
+""" % locals()  
+
+    if len(argv) > 0 and len(argv[0]) > 0:
+        script += r"os.execve(exe, argv, env) " 
+
+    # os.execve does not allow us to pass empty argv[0]
+    # Therefore we use ctypes to call execve directly
+    else:
+        script += r"""
+# Transform envp from dict to list
+env_list = [key + b"=" + value for key, value in env.items()]
+
+# ctypes helper to convert a python list to a NULL-terminated C array
+def to_carray(py_list):
+    py_list += [None] # NULL-terminated
+    return (ctypes.c_char_p * len(py_list))(*py_list)
+
+c_argv = to_carray(argv)
+c_env = to_carray(env_list)
+
+# Call execve
+libc = ctypes.CDLL('libc.so.6')
+libc.execve(exe, c_argv, c_env)
+
+# We should never get here, since we sanitized argv and env,
+# but just in case, indicate that something went wrong.
+libc.perror(b"execve")
+raise OSError("execve failed")
+"""
+    script = script.strip()
+
+    return script

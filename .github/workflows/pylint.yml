@@ -5,33 +5,32 @@ jobs:
   build:
     strategy:
       matrix:
-        python-version: [3.8]
+        python-version: ['3.10']
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v2
-    - name: Cache for pip
-      uses: actions/cache@v1
-      id: cache-pip
-      with:
-        path: ~/.cache/pip
-        key: ${{ matrix.os }}-cache-pip
+    - uses: actions/checkout@v7
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v1
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+        cache-dependency-path: |
+          **/pyproject.toml
+          **/requirements*.txt
 
     - name: PyLint
       run: |
         set -x
-        pip install pylint
-        pip install --upgrade -r requirements.txt
-        pylint --exit-zero --errors-only  pwnlib > current.txt
+        pip install 'pylint<4'
+        pip install --upgrade -e .
+        run_pylint() { pylint --exit-zero --errors-only pwnlib -f parseable | cut -d ' ' -f2- | sed 's/line [0-9]\+/line XXXX/g'; }
+        run_pylint > current.txt
         git fetch origin
         git checkout origin/"$GITHUB_BASE_REF"
-        pylint --exit-zero --errors-only  pwnlib > base.txt
+        run_pylint > base.txt
         if diff base.txt current.txt | grep '>'; then
           false
         fi

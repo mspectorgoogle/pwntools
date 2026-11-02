@@ -1,8 +1,7 @@
 <%
   from pwnlib.shellcraft import aarch64, pretty
-  from pwnlib.constants import eval
+  from pwnlib.constants import Constant
   from pwnlib.abi import linux_aarch64_syscall as abi
-  from six import text_type
 %>
 <%page args="syscall = None, arg0 = None, arg1 = None, arg2 = None, arg3 = None, arg4 = None, arg5 = None, arg6 = None"/>
 <%docstring>
@@ -13,11 +12,11 @@ Any of the arguments can be expressions to be evaluated by :func:`pwnlib.constan
 
 Example:
 
-    >>> print(shellcraft.aarch64.linux.syscall(11, 1, 'sp', 2, 0).rstrip())
-        /* call syscall(0xb, 1, 'sp', 2, 0) */
-        mov  x0, #1
-        mov  x1, sp
-        mov  x2, #2
+    >>> print(shellcraft.aarch64.linux.syscall(11, 9, 'sp', 8, 0).rstrip())
+        /* call syscall(0xb, 9, 'sp', 8, 0) */
+        mov  x0, #9
+        add  x1, sp, xzr
+        mov  x2, #8
         mov  x3, xzr
         mov  x8, #11
         svc 0
@@ -39,7 +38,7 @@ Example:
         movk x15, #27750, lsl #16
         movk x15, #26465, lsl #0x20
         stp x14, x15, [sp, #-16]!
-        mov  x1, sp
+        add  x1, sp, xzr
         /* Set x0 = -2 = -2 */
         mov  x0, #65534
         movk x0, #65535, lsl #16
@@ -51,8 +50,8 @@ Example:
         svc 0
 </%docstring>
 <%
-  if isinstance(syscall, (str, text_type)) and syscall.startswith('SYS_'):
-      syscall_repr = syscall[4:] + "(%s)"
+  if isinstance(syscall, (str, Constant)) and str(syscall).startswith('SYS_'):
+      syscall_repr = str(syscall)[4:] + "(%s)"
       args = []
   else:
       syscall_repr = 'syscall(%s)'

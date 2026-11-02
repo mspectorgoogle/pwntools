@@ -1,7 +1,3 @@
-from __future__ import absolute_import
-from __future__ import division
-
-import six
 import string
 
 from pwnlib.context import context, LocalNoarchContext
@@ -197,6 +193,16 @@ def cyclic_find(subseq, alphabet = None, n = None):
         >>> cyclic_find(0x61616162, endian='big')
         1
 
+        Similarly to the case where you can provide a bytes value that is longer
+        than four bytes, you can provided an integer value that is larger than
+        what can be held in four bytes. If such a large value is given, it is
+        automatically truncated.
+
+        >>> cyclic_find(0x6161616361616162)
+        4
+        >>> cyclic_find(0x6261616163616161, endian='big')
+        4
+
         You can use anything for the cyclic pattern, including non-printable
         characters.
 
@@ -207,15 +213,33 @@ def cyclic_find(subseq, alphabet = None, n = None):
     if n is None:
         n = context.cyclic_size
 
-    if isinstance(subseq, six.integer_types):
+    if isinstance(subseq, int):
+        if subseq >= 2**(8*n):
+            # Assumption: The user has given an integer that is more than 2**(8n) bits, but would otherwise fit within
+            #  a register of size 2**(8m) where m is a multiple of four
+            notice = ("cyclic_find() expected an integer argument <= {cap:#x}, you gave {gave:#x}\n"
+                      "Unless you specified cyclic(..., n={fits}), you probably just want the first {n} bytes.\n"
+                      "Truncating the data at {n} bytes.  Specify cyclic_find(..., n={fits}) to override this.").format(
+                cap=2**(8*n)-1,
+                gave=subseq,
+                # The number of bytes needed to represent subseq, rounded to the next 4
+                fits=int(round(float(subseq.bit_length()) / 32 + 0.5) * 32) // 8,
+                n=n,
+            )
+            log.warn_once(notice)
+            if context.endian == 'little':
+                subseq &= 2**(8*n) - 1
+            else:
+                while subseq >= 2**(8*n):
+                    subseq >>= 8*n
         subseq = packing.pack(subseq, bytes=n)
     subseq = packing._need_bytes(subseq, 2, 0x80)
 
     if len(subseq) != n:
-        log.warn_once("cyclic_find() expects %i-byte subsequences by default, you gave %r\n"
-            "Unless you specified cyclic(..., n=%i), you probably just want the first 4 bytes.\n"
-            "Truncating the data at 4 bytes.  Specify cyclic_find(..., n=%i) to override this.",
-            n, subseq, len(subseq), len(subseq))
+        log.warn_once("cyclic_find() expected a %i-byte subsequence, you gave %r\n"
+            "Unless you specified cyclic(..., n=%i), you probably just want the first %d bytes.\n"
+            "Truncating the data at %d bytes.  Specify cyclic_find(..., n=%i) to override this.",
+            n, subseq, len(subseq), n, n, len(subseq))
         subseq = subseq[:n]
 
     if alphabet is None:
@@ -270,6 +294,7 @@ def cyclic_metasploit(length = None, sets = None):
         sets: List of strings to generate the sequence over.
 
     Example:
+
         >>> cyclic_metasploit(32)
         b'Aa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab'
         >>> cyclic_metasploit(sets = [b"AB",b"ab",b"12"])
@@ -310,7 +335,7 @@ def cyclic_metasploit_find(subseq, sets = None):
     """
     sets = sets or [ string.ascii_uppercase.encode(), string.ascii_lowercase.encode(), string.digits.encode() ]
 
-    if isinstance(subseq, six.integer_types):
+    if isinstance(subseq, int):
         subseq = packing.pack(subseq, 'all', 'little', False)
 
     return _gen_find(subseq, metasploit_pattern(sets))
@@ -333,14 +358,14 @@ def _gen_find(subseq, generator):
     return -1
 
 def _join_sequence(seq, alphabet):
-    if isinstance(alphabet, six.text_type):
+    if isinstance(alphabet, str):
         return ''.join(seq)
     elif isinstance(alphabet, bytes):
-        return bytes(bytearray(seq))
+        return bytes(seq)
     else:
         return seq
 
-class cyclic_gen(object):
+class cyclic_gen:
     """
     Creates a stateful cyclic generator which can generate sequential chunks of de Bruijn sequences.
 

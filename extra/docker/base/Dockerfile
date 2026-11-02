@@ -3,45 +3,47 @@
 # Based on Ubuntu
 ############################################################
 
-FROM ubuntu:bionic
-MAINTAINER Maintainer Gallopsled et al.
+FROM ubuntu:noble
+LABEL maintainer="Maintainer Gallopsled et al."
 
-env DEBIAN_FRONTEND=noninteractive
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
 
+ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-    && apt-get install locales \
-    && locale-gen en_US.UTF-8 \
     && apt-get install -y \
+        sudo \
+        locales \
         build-essential \
+        elfutils \
         git \
         libssl-dev \
         libffi-dev \
-        python \
-        python-pip \
-        python-dev \
         python3 \
         python3-pip \
         python3-dev \
+        python-is-python3 \
         qemu-user-static \
         binutils-arm-linux-gnueabihf \
         binutils-aarch64-linux-gnu \
         binutils-mips-linux-gnu \
         binutils-mipsel-linux-gnu \
+        binutils-msp430 \
         binutils-powerpc-linux-gnu \
         binutils-powerpc64-linux-gnu \
+        binutils-s390x-linux-gnu \
         binutils-sparc64-linux-gnu \
+        binutils-riscv64-linux-gnu \
+        binutils-loongarch64-linux-gnu \
         tmux \
-    && pip install --upgrade pip \
-    && python -m pip install --upgrade pwntools \
-    && pip3 install --upgrade pip \
-    && python3 -m pip install --upgrade pwntools \
+        patchelf \
+    && locale-gen en_US.UTF-8 \
+    && update-locale LANG=en_US.UTF-8 \
+    && python3 -m pip install --no-cache-dir --break-system-packages --upgrade pwntools \
     && PWNLIB_NOTERM=1 pwn update \
-    && apt-get install -y sudo \
+    && userdel -r ubuntu \
     && useradd -m pwntools \
     && passwd --delete --unlock pwntools \
     && echo "pwntools ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/pwntools
 USER pwntools
-WORKDIR /home/pwntools

@@ -15,8 +15,13 @@
    from pwnlib.tubes.process import process
    from pwnlib import shellcraft
    from pwnlib.util.misc import which
+   import pwnlib.data
 
    context.clear()
+
+   # TODO: Remove global LINUX flag
+   import doctest
+   doctest_additional_flags = doctest.OPTIONFLAGS_BY_NAME['LINUX']
 
 
 :mod:`pwnlib.rop.rop` --- Return Oriented Programming

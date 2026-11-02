@@ -1,13 +1,24 @@
-from __future__ import absolute_import
-from __future__ import division
-
 import functools
 import os
 import sys
 import types
+from typing import TYPE_CHECKING
 
 from pwnlib.term import termcap
+from pwnlib.internal.typing import WhenSetter, TextDecorator
 
+
+if TYPE_CHECKING:
+    # Accept any module attribute for type checking purposes.
+    # The actual implementation of __getattr__ is below, and
+    # only accepts a defined text decorator pattern, but generating
+    # all possible combinations of text decorators is not feasible.
+    # No IDE auto-complete but at least no type errors.
+    def __getattr__(name: str) -> TextDecorator: ...
+    def get(desc: str) -> TextDecorator: ...
+    when: bool | WhenSetter
+    has_bright: bool
+    has_gray: bool
 
 def eval_when(when):
     if hasattr(when, 'isatty') or \
@@ -27,9 +38,7 @@ class Module(types.ModuleType):
     def __init__(self):
         self.__file__ = __file__
         self.__name__ = __name__
-        self.num_colors = 8
-        self.has_bright = self.num_colors >= 16
-        self.has_gray = self.has_bright
+        self.num_colors = termcap.get('colors', default=8) if sys.platform == 'win32' else 8
         self.when = 'auto'
         self._colors = {
             'black': 0,
@@ -61,6 +70,14 @@ class Module(types.ModuleType):
     def when(self, val):
         self._when = eval_when(val)
 
+    @property
+    def has_bright(self):
+        return self.num_colors >= 16
+    
+    @property
+    def has_gray(self):
+        return self.has_bright
+
     def _fg_color(self, c):
         c = termcap.get('setaf', c) or termcap.get('setf', c)
         if not hasattr(c, 'encode'):
@@ -88,7 +105,10 @@ class Module(types.ModuleType):
         setattr(Module, desc, f)
         return functools.partial(f, self)
 
-    def __getattr__(self, desc):
+    def __getattr__(self, desc: str) -> TextDecorator:
+        if desc.startswith('_'):
+            raise AttributeError(desc)
+
         try:
             ds = desc.replace('gray', 'bright_black').split('_')
             init = ''
@@ -120,7 +140,7 @@ class Module(types.ModuleType):
         except (IndexError, KeyError):
             raise AttributeError("'module' object has no attribute %r" % desc)
 
-    def get(self, desc):
+    def get(self, desc: str) -> TextDecorator:
         return self.__getattr__(desc)
 
 tether = sys.modules[__name__]

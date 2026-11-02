@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 r"""
 Utilities for assembling and disassembling code.
 
@@ -39,9 +38,6 @@ Disassembly
     '   0:   b8 0b 00 00 00          mov    eax, 0xb'
 
 """
-from __future__ import absolute_import
-from __future__ import division
-
 import errno
 import os
 import platform
@@ -59,6 +55,10 @@ from pwnlib import shellcraft
 from pwnlib.context import LocalContext
 from pwnlib.context import context
 from pwnlib.log import getLogger
+from pwnlib.util.fiddling import hexstr
+from pwnlib.util.hashes import sha1sumhex
+from pwnlib.util.packing import _encode
+from pwnlib.version import __version__
 
 log = getLogger(__name__)
 
@@ -130,14 +130,28 @@ def print_binutils_instructions(util, context):
     if packages:
         instructions = '$ sudo apt-get install %s' % packages[0]
 
-    log.error("""
-Could not find %(util)r installed for %(context)s
+    log.error(f"""\
+Could not find {util!r} installed for {context}
 Try installing binutils for this architecture:
-%(instructions)s
-""".strip() % locals())
+{instructions}""")
+
+
+def check_binutils_version(util):
+    if util_versions[util]:
+        return util_versions[util]
+    result = subprocess.check_output([util, '--version','/dev/null'],
+                                     stderr=subprocess.STDOUT, universal_newlines=True)
+    if 'clang' in result:
+        log.warn_once('Your binutils is clang-based and may not work!\n'
+            'Try installing with: https://docs.pwntools.com/en/stable/install/binutils.html\n'
+            'Reported version: %r', result.strip())
+    version = re.search(r' (\d+\.\d+)', result).group(1)
+    util_versions[util] = version = tuple(map(int, version.split('.')))
+    return version
+
 
 @LocalContext
-def which_binutils(util):
+def which_binutils(util, check_version=False):
     """
     Finds a binutils in the PATH somewhere.
     Expects that the utility is prefixed with the architecture name.
@@ -152,6 +166,8 @@ def which_binutils(util):
         '.../bin/arm-...-as'
         >>> which_binutils('as', arch='powerpc') #doctest: +ELLIPSIS
         '.../bin/powerpc...-as'
+        >>> which_binutils('as', arch='mips', endianness='little') #doctest: +ELLIPSIS
+        '.../bin/mipsel...-as'
         >>> which_binutils('as', arch='msp430') #doctest: +SKIP
         ...
         Traceback (most recent call last):
@@ -160,26 +176,45 @@ def which_binutils(util):
     """
     arch = context.arch
 
+    # Handle endianness-specific naming for mips/mips64
+    arch = {
+        ('mips', 'little'): 'mipsel',
+        ('mips64', 'little'): 'mips64el',
+    }.get((arch, context.endianness), arch)
+
     # Fix up pwntools vs Debian triplet naming, and account
     # for 'thumb' being its own pwntools architecture.
-    arches = [arch] + {
+    aliases = {
         'thumb':  ['arm',    'aarch64'],
-        'i386':   ['x86_64', 'amd64'],
         'i686':   ['x86_64', 'amd64'],
-        'amd64':  ['x86_64', 'i386'],
-        'mips64': ['mips'],
-        'powerpc64': ['powerpc'],
-        'sparc64': ['sparc'],
+        'amd64':  ['x86_64'],
+        'loongarch64': ['loong64'],
     }.get(arch, [])
 
+    # Some binutils can support multiple architectures. Try them as fallbacks.
+    fallback_arches = {
+        'i386':   ['x86_64', 'amd64'],
+        'amd64':  ['i386'],
+        'arm':  ['aarch64'],
+        'mips': ['mipsel'],
+        'mipsel': ['mips'],
+        'mips64': ['mips64el', 'mips', 'mipsel'],
+        'mips64el': ['mips64', 'mipsel', 'mips'],
+        'powerpc64': ['powerpc'],
+        'sparc64': ['sparc'],
+        'riscv32': ['riscv64', 'riscv'],
+        'riscv64': ['riscv32', 'riscv'],
+    }.get(arch, [])
+    arches = [arch] + aliases + fallback_arches
+
     # If one of the candidate architectures matches the native
-    # architecture, use that as a last resort.
+    # architecture, use that as a last resort before trying fallbacks.
     machine = platform.machine()
     machine = 'i386' if machine == 'i686' else machine
     try:
         with context.local(arch = machine):
             if context.arch in arches:
-                arches.append(None)
+                arches = [arch] + aliases + [None] + fallback_arches
     except AttributeError:
         log.warn_once("Your local binutils won't be used because architecture %r is not supported." % machine)
 
@@ -189,6 +224,11 @@ def which_binutils(util):
     if platform.system() == 'Darwin':
         utils = ['g'+util, util]
 
+    if platform.system() == 'Windows':
+        utils = [util + '.exe']
+
+    # Try the explicit tools for the target architecture first,
+    # then the native one optionally, then fallbacks.
     for arch in arches:
         for gutil in utils:
             # e.g. objdump
@@ -203,18 +243,24 @@ def which_binutils(util):
                             '%s-%s' % (arch, gutil)]
 
             for pattern in patterns:
-                for dir in environ['PATH'].split(':'):
-                    res = sorted(glob(path.join(dir, pattern)))
-                    if res:
-                        return res[0]
+                for dir in environ['PATH'].split(os.pathsep):
+                    for res in sorted(glob(path.join(dir, pattern))):
+                        if check_version:
+                            ver = check_binutils_version(res)
+                            return res, ver
+                        return res
 
     # No dice!
     print_binutils_instructions(util, context)
 
-checked_assembler_version = defaultdict(lambda: False)
+util_versions: defaultdict[str, tuple[int, ...]] = defaultdict(tuple)
 
 def _assembler():
-    gas = which_binutils('as')
+    gas, version = which_binutils('as', check_version=True)
+    if version < (2, 19):
+        log.warn_once('Your binutils version is too old and may not work!\n'
+            'Try updating with: https://docs.pwntools.com/en/stable/install/binutils.html\n'
+            'Reported version: %r', version)
 
     E = {
         'big':    '-EB',
@@ -241,30 +287,22 @@ def _assembler():
         'powerpc64': [gas, '-m%s' % context.endianness, '-mppc%s' % context.bits],
 
         # ia64 only accepts -mbe or -mle
-        'ia64':    [gas, '-m%ce' % context.endianness[0]]
+        'ia64':    [gas, '-m%ce' % context.endianness[0]],
+
+        # riscv64-unknown-elf-as supports riscv32 as well as riscv64
+        'riscv32': [gas, '-march=rv32gv_zba_zbb_zbs', '-mabi=ilp32'],
+        'riscv64': [gas, '-march=rv64gv_zba_zbb_zbs', '-mabi=lp64'],
+
+        # loongarch64 supports none of -64, -EB, -EL or -march
+        'loongarch64'  : [gas],
     }
 
     assembler = assemblers.get(context.arch, [gas])
 
-    if not checked_assembler_version[gas]:
-        checked_assembler_version[gas] = True
-        result = subprocess.check_output([gas, '--version','/dev/null'],
-                                         stderr=subprocess.STDOUT, universal_newlines=True)
-        version = re.search(r' (\d+\.\d+)', result).group(1)
-        if 'clang' in result:
-            log.warn_once('Your binutils is clang version and may not work!\n'
-                'Try install with: https://docs.pwntools.com/en/stable/install/binutils.html\n'
-                'Reported Version: %r', result.strip())
-        elif version < '2.19':
-            log.warn_once('Your binutils version is too old and may not work!\n'
-                'Try updating with: https://docs.pwntools.com/en/stable/install/binutils.html\n'
-                'Reported Version: %r', result.strip())
-
-
     return assembler
 
 def _linker():
-    ld  = [which_binutils('ld')]
+    ld, _ = which_binutils('ld', check_version=True)
     bfd = ['--oformat=' + _bfdname()]
 
     E = {
@@ -276,7 +314,16 @@ def _linker():
         'i386': ['-m', 'elf_i386'],
     }.get(context.arch, [])
 
-    return ld + bfd + [E] + arguments
+    return [ld] + bfd + [E] + arguments
+
+
+def _execstack(linker):
+    ldflags = ['-z', 'execstack']
+    version = util_versions[linker[0]]
+    if version >= (2, 39):
+        return ldflags + ['--no-warn-execstack', '--no-warn-rwx-segments']
+    return ldflags
+
 
 def _objcopy():
     return [which_binutils('objcopy')]
@@ -305,20 +352,23 @@ def _arch_header():
     prefix  = ['.section .shellcode,"awx"',
                 '.global _start',
                 '.global __start',
-                '.p2align 2',
                 '_start:',
                 '__start:']
     headers = {
-        'i386'  :  ['.intel_syntax noprefix'],
-        'amd64' :  ['.intel_syntax noprefix'],
+        'i386'  :  ['.intel_syntax noprefix', '.p2align 0'],
+        'amd64' :  ['.intel_syntax noprefix', '.p2align 0'],
         'arm'   : ['.syntax unified',
                    '.arch armv7-a',
-                   '.arm'],
+                   '.arm',
+                   '.p2align 2'],
         'thumb' : ['.syntax unified',
                    '.arch armv7-a',
-                   '.thumb'],
+                   '.thumb',
+                   '.p2align 2'
+                   ],
         'mips'  : ['.set mips2',
                    '.set noreorder',
+                   '.p2align 2'
                    ],
     }
 
@@ -344,7 +394,9 @@ def _bfdname():
         'msp430'  : 'elf32-msp430',
         'powerpc' : 'elf32-powerpc',
         'powerpc64' : 'elf64-powerpc',
-        'riscv'   : 'elf%d-%sriscv' % (context.bits, E),
+        'riscv32' : 'elf%d-%sriscv' % (context.bits, E),
+        'riscv64' : 'elf%d-%sriscv' % (context.bits, E),
+        'loongarch64' : 'elf%d-loongarch' % context.bits,
         'vax'     : 'elf32-vax',
         's390'    : 'elf%d-s390' % context.bits,
         'sparc'   : 'elf32-sparc',
@@ -367,6 +419,9 @@ def _bfdarch():
         'powerpc64': 'powerpc',
         'sparc64':   'sparc',
         'thumb':     'arm',
+        'riscv32':   'riscv',
+        'riscv64':   'riscv',
+        'loongarch64': 'loongarch64'
     }
 
     if arch in convert:
@@ -430,17 +485,23 @@ def cpp(shellcode):
         >>> cpp("SYS_setresuid", os = "freebsd")
         '311\n'
     """
+    if platform.system() == 'Windows':
+        cpp = which_binutils('cpp')
+    else:
+        cpp = 'cpp'
+
     code = _include_header() + shellcode
     cmd  = [
-        'cpp',
+        cpp,
+        '-Wno-unused-command-line-argument',
         '-C',
         '-nostdinc',
         '-undef',
         '-P',
         '-I' + _incdir,
-        '/dev/stdin'
     ]
     return _run(cmd, code).strip('\n').rstrip() + '\n'
+
 
 @LocalContext
 def make_elf_from_assembly(assembly,
@@ -579,8 +640,7 @@ def make_elf(data,
     assembler = _assembler()
     linker    = _linker()
     code      = _arch_header()
-    code      += '.string "%s"' % ''.join('\\x%02x' % c for c in bytearray(data))
-    code      += '\n'
+    code      += f'.string {hexstr(data)}\n'
 
     log.debug("Building ELF:\n" + code)
 
@@ -595,7 +655,7 @@ def make_elf(data,
 
         _run(assembler + ['-o', step2, step1])
 
-        linker_options = ['-z', 'execstack']
+        linker_options = _execstack(linker)
         if vma is not None:
             linker_options += ['--section-start=.shellcode=%#x' % vma,
                                '--entry=%#x' % vma]
@@ -623,6 +683,68 @@ def make_elf(data,
         atexit.register(lambda: shutil.rmtree(tmpdir))
 
     return retval
+
+
+@LocalContext
+def make_macho_from_assembly(shellcode):
+    return make_macho(shellcode, is_shellcode=True)
+
+
+@LocalContext
+def make_macho(data, is_shellcode=False):
+    prefix = []
+    if context.arch == 'amd64':
+        prefix = [
+            '.intel_syntax noprefix',
+        ]
+    prefix.extend([
+        '.text',
+        '.global _start',
+        '_start:',
+        '.p2align 2',
+    ])
+    code = ''
+    code += '\n'.join(prefix) + '\n'
+    if is_shellcode:
+        code += cpp(data)
+    else:
+        code += f'.string {hexstr(data)}\n'
+
+    log.debug('Assembling\n%s' % code)
+
+    tmpdir = tempfile.mkdtemp(prefix = 'pwn-asm-')
+    step1 = path.join(tmpdir, 'step1')
+    step2 = path.join(tmpdir, 'step2')
+    step3 = path.join(tmpdir, 'step3')
+
+    with open(step1, 'w') as fd:
+        fd.write(code)
+
+    assembler = [
+        '/usr/bin/as',
+    ]
+    asflags = [
+        '-mmacosx-version-min=11.0',
+        '-o', step2, step1,
+    ]
+    _run(assembler + asflags)
+
+    linker = [
+        '/usr/bin/ld',
+    ]
+    ldflags = [
+        '-macos_version_min', '11.0',
+        '-l', 'System',
+        '-e', '_start',
+        '-L', '/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib',
+        '-o', step3, step2,
+    ]
+    _run(linker + ldflags)
+
+    os.chmod(step3, 0o755)
+
+    return step3
+
 
 @LocalContext
 def asm(shellcode, vma = 0, extract = True, shared = False):
@@ -661,8 +783,23 @@ def asm(shellcode, vma = 0, extract = True, shared = False):
         b'0@*\x00'
         >>> asm("la %r0, 42", arch = 's390', bits=64)
         b'A\x00\x00*'
+
+        The output is cached:
+
+        >>> start = time.time()
+        >>> asm("lea rax, [rip+0]", arch = 'amd64', cache_dir = None) # force uncached time
+        b'H\x8d\x05\x00\x00\x00\x00'
+        >>> uncached_time = time.time() - start
+        >>> asm("lea rax, [rip+0]", arch = 'amd64') # cache it
+        b'H\x8d\x05\x00\x00\x00\x00'
+        >>> start = time.time()
+        >>> asm("lea rax, [rip+0]", arch = 'amd64')
+        b'H\x8d\x05\x00\x00\x00\x00'
+        >>> cached_time = time.time() - start
+        >>> uncached_time > cached_time
+        True
     """
-    result = ''
+    result = b''
 
     assembler = _assembler()
     linker    = _linker()
@@ -672,6 +809,30 @@ def asm(shellcode, vma = 0, extract = True, shared = False):
     code      += cpp(shellcode)
 
     log.debug('Assembling\n%s' % code)
+
+    cache_file = None
+    if context.cache_dir:
+        cache_dir = os.path.join(context.cache_dir, 'asm-cache')
+        if not os.path.isdir(cache_dir):
+            os.makedirs(cache_dir)
+
+        # Include the context in the hash in addition to the shellcode
+        hash_params = f'{vma}_{extract}_{shared}_{__version__}'
+        fingerprint_params = _encode(code) + _encode(hash_params) + _encode(' '.join(assembler)) + _encode(' '.join(linker)) + _encode(' '.join(objcopy))
+        asm_hash = sha1sumhex(fingerprint_params)
+        cache_file = os.path.join(cache_dir, asm_hash)
+        if os.path.exists(cache_file):
+            log.debug('Using cached assembly output from %r', cache_file)
+            if extract:
+                with open(cache_file, 'rb') as f:
+                    return f.read()
+
+            # Create a temporary copy of the cached file to avoid modification.
+            tmpdir = tempfile.mkdtemp(prefix = 'pwn-asm-')
+            atexit.register(shutil.rmtree, tmpdir)
+            step3 = os.path.join(tmpdir, 'step3')
+            shutil.copy(cache_file, step3)
+            return step3
 
     tmpdir    = tempfile.mkdtemp(prefix = 'pwn-asm-')
     step1     = path.join(tmpdir, 'step1')
@@ -689,7 +850,7 @@ def asm(shellcode, vma = 0, extract = True, shared = False):
             shutil.copy(step2, step3)
 
         if vma or not extract:
-            ldflags = ['-z', 'execstack', '-o', step3, step2]
+            ldflags = _execstack(linker) + ['-o', step3, step2]
             if vma:
                 ldflags += ['--section-start=.shellcode=%#x' % vma,
                             '--entry=%#x' % vma]
@@ -715,11 +876,13 @@ def asm(shellcode, vma = 0, extract = True, shared = False):
                 universal_newlines = True
             ).strip()
             if extract and len(relocs.split('\n')) > 1:
-                log.error('Shellcode contains relocations:\n%s' % relocs)
+                log.warn('Shellcode contains relocations:\n%s' % relocs)
         else:
             shutil.copy(step2, step3)
 
         if not extract:
+            if cache_file is not None:
+                shutil.copy(step3, cache_file)
             return step3
 
         _run(objcopy + [step3, step4])
@@ -732,6 +895,10 @@ def asm(shellcode, vma = 0, extract = True, shared = False):
         log.exception("An error occurred while assembling:\n%s" % lines)
     else:
         atexit.register(lambda: shutil.rmtree(tmpdir))
+
+    if cache_file is not None and result != b'':
+        with open(cache_file, 'wb') as f:
+            f.write(result)
 
     return result
 
@@ -765,13 +932,13 @@ def disasm(data, vma = 0, byte = True, offset = True, instructions = True):
            0:   b8 17 00 00 00          mov    eax, 0x17
         >>> print(disasm(unhex('48c7c017000000'), arch = 'amd64'))
            0:   48 c7 c0 17 00 00 00    mov    rax, 0x17
-        >>> print(disasm(unhex('04001fe552009000'), arch = 'arm'))
-           0:   e51f0004        ldr     r0, [pc, #-4]   ; 0x4
+        >>> print(disasm(unhex('04001fe552009000'), arch = 'arm'))  # doctest: +ELLIPSIS
+           0:   e51f0004        ldr     r0, [pc, #-4]   ...
            4:   00900052        addseq  r0, r0, r2, asr r0
         >>> print(disasm(unhex('4ff00500'), arch = 'thumb', bits=32))
            0:   f04f 0005       mov.w   r0, #5
         >>> print(disasm(unhex('656664676665400F18A4000000000051'), byte=0, arch='amd64'))
-           0:   gs data16 fs data16 rex nop/reserved BYTE PTR gs:[eax+eax*1+0x0]
+           0:   gs data16 fs rex nop WORD PTR gs:[eax+eax*1+0x0]
            f:   push   rcx
         >>> print(disasm(unhex('01000000'), arch='sparc64'))
            0:   01 00 00 00     nop
@@ -779,6 +946,11 @@ def disasm(data, vma = 0, byte = True, offset = True, instructions = True):
            0:   60 00 00 00     nop
         >>> print(disasm(unhex('00000000'), arch='mips64'))
            0:   00000000        nop
+        >>> print(disasm(unhex('48b84141414141414100c3'), arch='amd64'))
+           0:   48 b8 41 41 41 41 41 41 41 00   movabs rax, 0x41414141414141
+           a:   c3                      ret
+        >>> print(disasm(unhex('00000000'), vma=0x80000000, arch='mips'))
+        80000000:       00000000        nop
     """
     result = ''
 
@@ -790,7 +962,7 @@ def disasm(data, vma = 0, byte = True, offset = True, instructions = True):
 
     bfdarch = _bfdarch()
     bfdname = _bfdname()
-    objdump = _objdump() + ['-d', '--adjust-vma', str(vma), '-b', bfdname]
+    objdump = _objdump() + ['-w', '-d', '--adjust-vma', str(vma), '-b', bfdname]
     objcopy = _objcopy() + [
         '-I', 'binary',
         '-O', bfdname,
@@ -815,7 +987,7 @@ def disasm(data, vma = 0, byte = True, offset = True, instructions = True):
         _run(objcopy + [step1, step2])
 
         output0 = _run(objdump + [step2])
-        output1 = output0.split('<.text>:\n')
+        output1 = re.split(r'<\.text(?:\+0x0)?>:\n', output0, flags=re.MULTILINE)
 
         if len(output1) != 2:
             log.error('Could not find .text in objdump output:\n%s' % output0)
@@ -828,6 +1000,8 @@ def disasm(data, vma = 0, byte = True, offset = True, instructions = True):
 
 
     lines = []
+
+    # Note: those patterns are also used in pwnlib/commandline/disasm.py
     pattern = '^( *[0-9a-f]+: *)', '((?:[0-9a-f]+ )+ *)', '(.*)'
     if not byte:
         pattern = pattern[::2]

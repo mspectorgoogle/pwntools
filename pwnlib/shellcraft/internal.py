@@ -1,13 +1,16 @@
-from __future__ import absolute_import
-from __future__ import division
-
+from __future__ import annotations
 import os
+import sys
+from typing import TYPE_CHECKING
 
 from pwnlib.context import context
 
 __all__ = ['make_function']
 
-loaded = {}
+if TYPE_CHECKING:
+    from mako.template import Template
+
+loaded: dict[str, Template] = {}
 lookup = None
 def init_mako():
     global lookup, render_global
@@ -19,7 +22,7 @@ def init_mako():
     if lookup is not None:
         return
 
-    class IsInsideManager(object):
+    class IsInsideManager:
         def __init__(self, parent):
             self.parent = parent
         def __enter__(self):
@@ -109,47 +112,17 @@ def get_context_from_dirpath(directory):
     return {'os': osys, 'arch': arch}
 
 def make_function(funcname, filename, directory):
+    import functools
     import inspect
     path       = os.path.join(directory, filename)
     template   = lookup_template(path)
 
-    args, varargs, keywords, defaults = inspect.getargspec(template.module.render_body)
-
-    defaults = defaults or []
-
-    if len(defaults) < len(args) and args[0] == 'context':
-        args.pop(0)
-
-    args_used = args[:]
-
-    for n, default in enumerate(defaults, len(args) - len(defaults)):
-        args[n] = '%s = %r' % (args[n], default)
-
-    if varargs:
-        args.append('*' + varargs)
-        args_used.append('*' + varargs)
-
-    if keywords not in ['pageargs', None]:
-        args.append('**' + keywords)
-        args_used.append('**' + keywords)
-
-    docstring = inspect.cleandoc(template.module.__doc__ or '')
-    args      = ', '.join(args)
-    args_used = ', '.join(args_used)
     local_ctx = get_context_from_dirpath(directory)
 
-    # This is a slight hack to get the right signature for the function
-    # It would be possible to simply create an (*args, **kwargs) wrapper,
-    # but what would not have the right signature.
-    # While we are at it, we insert the docstring too
-    T = r'''
-def wrap(template, render_global):
-    import pwnlib
-    def %(funcname)s(%(args)s):
-        %(docstring)r
+    def res(*args, **kwargs):
         with render_global.go_inside() as was_inside:
-            with pwnlib.context.context.local(**%(local_ctx)s):
-                lines = template.render(%(args_used)s).split('\n')
+            with context.local(**local_ctx):
+                lines = template.render(*args, **kwargs).split('\n')
         for i, line in enumerate(lines):
             def islabelchar(c):
                 return c.isalnum() or c == '.' or c == '_'
@@ -168,19 +141,16 @@ def wrap(template, render_global):
             return s
         else:
             return s + '\n'
-    return %(funcname)s
-''' % locals()
-
-    g = {}
-    exec(T, g, g)
-    wrap = g['wrap']
 
     # Setting _relpath is a slight hack only used to get better documentation
-    res = wrap(template, render_global)
     res._relpath = path
     res.__module__ = 'pwnlib.shellcraft.' + os.path.dirname(path).replace('/','.')
-
-    import sys, functools
+    res.__name__ = res.__qualname__ = funcname
+    res.__doc__ = inspect.cleandoc(template.module.__doc__ or '')
+    if hasattr(inspect, 'signature'):
+        sig = inspect.signature(template.module.render_body)
+        sig = sig.replace(parameters=list(sig.parameters.values())[1:-1])
+        res.__signature__ = sig
 
     @functools.wraps(res)
     def function(*a):

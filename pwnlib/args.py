@@ -17,7 +17,10 @@ The easiest example is to enable more verbose debugging.  Just set ``DEBUG``.
 These arguments are automatically extracted, regardless of their name, and
 exposed via :mod:`pwnlib.args.args`, which is exposed as the global variable
 :data:`args`.  Arguments which ``pwntools`` reserves internally are not exposed
-this way.
+this way.  These reserved arguments (such as ``DEBUG`` and ``NOASLR``) instead
+adjust :data:`pwnlib.context.context`, so their effect is read from ``context``
+(e.g. ``context.log_level``, ``context.aslr``) rather than from ``args`` --
+``args.NOASLR`` is always the empty string.
 
 .. code-block:: bash
 
@@ -48,9 +51,6 @@ The full list of supported "magic arguments" and their effects are listed
 below.
 
 """
-from __future__ import absolute_import
-from __future__ import division
-
 import collections
 import logging
 import os
@@ -62,6 +62,8 @@ from pwnlib.context import context
 
 class PwnlibArgs(collections.defaultdict):
     def __getattr__(self, attr):
+        if attr.startswith('_'):
+            raise AttributeError(attr)
         return self[attr]
 
 args = PwnlibArgs(str)
@@ -157,6 +159,11 @@ def STDERR(v):
     """Sends logging to ``stderr`` by default, instead of ``stdout``"""
     context.log_console = sys.stderr
 
+def LOCAL_LIBCDB(v):
+    """Sets path to local libc-database via ``context.local_libcdb``, e.g. 
+    ``LOCAL_LIBCDB='/path/to/libc-databse'``"""
+    context.local_libcdb = v
+
 hooks = {
     'LOG_LEVEL': LOG_LEVEL,
     'LOG_FILE': LOG_FILE,
@@ -168,6 +175,7 @@ hooks = {
     'NOASLR': NOASLR,
     'NOPTRACE': NOPTRACE,
     'STDERR': STDERR,
+    'LOCAL_LIBCDB': LOCAL_LIBCDB,
 }
 
 def initialize():

@@ -1,6 +1,5 @@
-from __future__ import division
-from __future__ import absolute_import
-
+# Copyright (c) 2013 Pratik Kumar Sahu, Nagendra Chowdary, Anish Mathuria
+# Ported to Python by Gallopsled
 from . import random_funcs
 
 # +------------------------------------------------------------------------+ 

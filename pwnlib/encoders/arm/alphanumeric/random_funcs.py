@@ -1,5 +1,5 @@
-from __future__ import division
-
+# Copyright (c) 2013 Pratik Kumar Sahu, Nagendra Chowdary, Anish Mathuria
+# Ported to Python by Gallopsled
 import os
 import random
 import struct

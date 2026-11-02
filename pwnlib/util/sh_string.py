@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 r"""
 Routines here are for getting any NULL-terminated sequence of bytes evaluated
 intact by any shell.  This includes all variants of quotes, whitespace, and
@@ -231,21 +230,19 @@ BusyBox Shell
 and should therefore be compatible with ``dash``.
 
 
-.. _Ubuntu Man Pages: http://manpages.ubuntu.com/manpages/trusty/man1/dash.1.html
+.. _Ubuntu Man Pages: https://manpages.ubuntu.com/manpages/trusty/man1/dash.1.html
 .. _GNU Bash Manual: https://www.gnu.org/software/bash/manual/bash.html#Quoting
-.. _Z Shell Manual: http://zsh.sourceforge.net/Doc/Release/Shell-Grammar.html#Quoting
+.. _Z Shell Manual: https://zsh.sourceforge.io/Doc/Release/Shell-Grammar.html#Quoting
 .. _FreeBSD man pages: https://www.freebsd.org/cgi/man.cgi?query=sh
-.. _OpenBSD Man Pages: http://man.openbsd.org/cgi-bin/man.cgi?query=sh#SHELL_GRAMMAR
+.. _OpenBSD Man Pages: https://man.openbsd.org/sh#SHELL_GRAMMAR
 .. _BusyBox's Wikipedia page: https://en.wikipedia.org/wiki/BusyBox#Features
 """
-from __future__ import absolute_import
-from __future__ import division
-
-import six
+import random
 import string
-import subprocess
+from typing import Callable, overload
 
 from pwnlib.context import context
+from pwnlib.internal.typing import ASCIIStr
 from pwnlib.log import getLogger
 from pwnlib.tubes.process import process
 from pwnlib.util import fiddling
@@ -253,13 +250,14 @@ from pwnlib.util.misc import which, normalize_argv_env
 
 log = getLogger(__name__)
 
-def test_all():
+def test_all() -> None:
     test('a') ##
     test('ab') ##
     test('a b') ##
     test(r"a\'b") ##
-    everything_1 = b''.join(six.int2byte(c) for c in range(1,256))
+    everything_1 = bytes(range(1,256))
     for s in everything_1:
+        s = bytes([s])
         test(s)
         test(s*4)
         test(s * 2 + b'X')
@@ -271,32 +269,35 @@ def test_all():
     test(everything_1)
     test(everything_1 * 2)
     test(everything_1 * 4)
-    everything_2 = b''.join(six.int2byte(c) * 2 for c in range(1,256)) ##
+    everything_2 = b''.join(bytes([c,c]) for c in range(1,256)) ##
     test(everything_2)
 
-    test(randoms(1000, everything_1))
+    test(b''.join(bytes([random.choice(everything_1)]) for _ in range(1000)))
 
 
-def test(original):
+def test(original: bytes | str) -> None:
     r"""Tests the output provided by a shell interpreting a string
 
-    >>> test(b'foobar')
-    >>> test(b'foo bar')
-    >>> test(b'foo bar\n')
-    >>> test(b"foo'bar")
-    >>> test(b"foo\\\\bar")
-    >>> test(b"foo\\\\'bar")
-    >>> test(b"foo\\x01'bar")
-    >>> test(b'\n')
-    >>> test(b'\xff')
-    >>> test(os.urandom(16 * 1024).replace(b'\x00', b''))
+    .. doctest::
+        :options: +POSIX
+
+        >>> test(b'foobar')
+        >>> test(b'foo bar')
+        >>> test(b'foo bar\n')
+        >>> test(b"foo'bar")
+        >>> test(b"foo\\\\bar")
+        >>> test(b"foo\\\\'bar")
+        >>> test(b"foo\\x01'bar")
+        >>> test(b'\n')
+        >>> test(b'\xff')
+        >>> test(os.urandom(16 * 1024).replace(b'\x00', b''))
     """
     input = sh_string(original)
 
-    if not isinstance(input, str):
-        input = input.decode('latin1')
+    if isinstance(input, str):
+        input = input.encode()
 
-    cmdstr = six.b('/bin/echo %s' % input)
+    cmdstr = b'/bin/echo %s' % input
 
     SUPPORTED_SHELLS = [
         ['ash', '-c', cmdstr],
@@ -351,7 +352,7 @@ ESCAPED_SINGLE_QUOTE = r"\'" ##
 
 ESCAPED = {
     # The single quote itself must be escaped, outside of single quotes.
-    "'": "\\'", ##
+    "'": r"\'", ##
 
     # Slashes must themselves be escaped
     #
@@ -360,7 +361,11 @@ ESCAPED = {
     # '\\': '"\\\\\\\\"'
 }
 
-def sh_string(s):
+@overload
+def sh_string(s: bytes | bytearray) -> bytes: ...
+@overload
+def sh_string(s: str) -> str: ...
+def sh_string(s: ASCIIStr) -> ASCIIStr:
     r"""Outputs a string in a format that will be understood by /bin/sh.
 
     If the string does not contain any bad characters, it will simply be
@@ -389,6 +394,8 @@ def sh_string(s):
         "'foo\\\\'\\''bar'"
         >>> sh_string("foo\\x01'bar")
         "'foo\\x01'\\''bar'"
+        >>> sh_string(b"foo\\x01'bar")
+        b"'foo\\x01'\\''bar'"
     """
     orig_s = s
     if isinstance(s, (bytes, bytearray)):
@@ -399,7 +406,7 @@ def sh_string(s):
     if not s:
         quoted_string = "''" ##
         if isinstance(orig_s, (bytes, bytearray)):
-            quoted_string = quoted_string.encode('latin1')
+            return quoted_string.encode('latin1')
         return quoted_string
 
     chars = set(s)
@@ -413,7 +420,7 @@ def sh_string(s):
     if not (chars & set(ESCAPED)):
         quoted_string = "'%s'" % s ##
         if isinstance(orig_s, (bytes, bytearray)):
-            quoted_string = quoted_string.encode('latin1')
+            return quoted_string.encode('latin1')
         return quoted_string
 
     # If there are single-quotes, we can single-quote around them, and simply
@@ -436,10 +443,10 @@ def sh_string(s):
         quoted_string += SINGLE_QUOTE
 
     if isinstance(orig_s, (bytes, bytearray)):
-        quoted_string = quoted_string.encode('latin1')
+        return quoted_string.encode('latin1')
     return quoted_string
 
-def sh_prepare(variables, export = False):
+def sh_prepare(variables: dict[str, ASCIIStr], export: bool = False) -> bytes:
     r"""Outputs a posix compliant shell command that will put the data specified
     by the dictionary into the environment.
 
@@ -458,8 +465,8 @@ def sh_prepare(variables, export = False):
         >>> sh_prepare({'X': 'foobar'})
         b'X=foobar'
         >>> r = sh_prepare({'X': 'foobar', 'Y': 'cookies'})
-        >>> r == b'X=foobar;Y=cookies' or r == b'Y=cookies;X=foobar' or r
-        True
+        >>> r
+        b'X=foobar;Y=cookies'
         >>> sh_prepare({'X': 'foo bar'})
         b"X='foo bar'"
         >>> sh_prepare({'X': "foo'bar"})
@@ -490,7 +497,7 @@ def sh_prepare(variables, export = False):
 
     return b';'.join(out)
 
-def sh_command_with(f, *args):
+def sh_command_with(f: Callable[[str | bytes], str] | str, *args: ASCIIStr) -> str:
     r"""sh_command_with(f, arg0, ..., argN) -> command
 
     Returns a command create by evaluating `f(new_arg0, ..., new_argN)`
@@ -523,7 +530,7 @@ def sh_command_with(f, *args):
 
     for n in range(len(args)):
         args[n] = sh_string(args[n])
-    if hasattr(f, '__call__'):
+    if callable(f):
         out.append(f(*args))
     else:
         out.append(f % tuple(args))

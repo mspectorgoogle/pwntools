@@ -1,9 +1,8 @@
-from __future__ import absolute_import
-from __future__ import division
-
 import errno
 import socket
+import sys
 import time
+from typing import Any, TypeAlias
 
 import psutil
 
@@ -16,7 +15,7 @@ log = getLogger(__name__)
 
 all_pids = psutil.pids
 
-def pidof(target):
+def pidof(target: str | tubes.ssh.ssh_process | tubes.sock.sock | tuple[str, int] | tubes.process.process) -> list[int]:
     """pidof(target) -> int list
 
     Get PID(s) of `target`.  The returned PID(s) depends on the type of `target`:
@@ -26,6 +25,11 @@ def pidof(target):
     - :class:`pwnlib.tubes.sock.sock`: singleton list of the PID at the
       remote end of `target` if it is running on the host.  Otherwise an
       empty list.
+    - :class:`pwnlib.tubes.ssh.ssh_process`: singleton list of the PID of
+      `target` on the remote system.
+    - :class:`tuple`: singleton list of the PID at the local end of the
+        connection to `target` if it is running on the host.  Otherwise an
+        empty list.
 
     Arguments:
         target(object):  The target whose PID(s) to find.
@@ -34,23 +38,26 @@ def pidof(target):
         A list of found PIDs.
 
     Example:
+
         >>> l = tubes.listen.listen()
         >>> p = process(['curl', '-s', 'http://127.0.0.1:%d'%l.lport])
-        >>> pidof(p) == pidof(l) == pidof(('127.0.0.1', l.lport))
+        >>> pidof(p) == pidof(l) == pidof(('127.0.0.1', l.rport))
         True
     """
-    if isinstance(target, tubes.ssh.ssh_channel):
+    if isinstance(target, tubes.ssh.ssh_process):
+        if target.pid is None:
+            raise ValueError("PID unknown for channel")
         return [target.pid]
 
     elif isinstance(target, tubes.sock.sock):
         local  = target.sock.getsockname()
         remote = target.sock.getpeername()
         match = sock_match(remote, local, target.family, target.type)
-        return [c.pid for c in psutil.net_connections() if match(c)]
+        return [c.pid for c in psutil.net_connections() if match(c) and c.pid is not None]
 
     elif isinstance(target, tuple):
-        match = sock_match(None, target)
-        return [c.pid for c in psutil.net_connections() if match(c)]
+        match = sock_match(target, None)
+        return [c.pid for c in psutil.net_connections() if match(c) and c.pid is not None]
 
     elif isinstance(target, tubes.process.process):
         return [target.proc.pid]
@@ -58,7 +65,7 @@ def pidof(target):
     else:
         return pid_by_name(target)
 
-def pid_by_name(name):
+def pid_by_name(name: str) -> list[int]:
     """pid_by_name(name) -> int list
 
     Arguments:
@@ -68,16 +75,19 @@ def pid_by_name(name):
         List of PIDs matching `name` sorted by lifetime, youngest to oldest.
 
     Example:
+
         >>> os.getpid() in pid_by_name(name(os.getpid()))
         True
     """
-    def match(p):
+    def match(p: psutil.Process) -> bool:
         if p.status() == 'zombie':
             return False
         if p.name() == name:
             return True
         try:
             if p.exe() == name:
+                return True
+            if p.cmdline()[0] == name:
                 return True
         except Exception:
             pass
@@ -89,7 +99,7 @@ def pid_by_name(name):
 
     return [p.pid for p in processes]
 
-def name(pid):
+def name(pid: int) -> str:
     """name(pid) -> str
 
     Arguments:
@@ -99,13 +109,14 @@ def name(pid):
         Name of process as listed in ``/proc/<pid>/status``.
 
     Example:
+
         >>> p = process('cat')
         >>> name(p.pid)
         'cat'
     """
     return psutil.Process(pid).name()
 
-def parent(pid):
+def parent(pid: int) -> int:
     """parent(pid) -> int
 
     Arguments:
@@ -120,7 +131,7 @@ def parent(pid):
     except Exception:
          return 0
 
-def children(ppid):
+def children(ppid: int) -> list[int]:
     """children(ppid) -> int list
 
     Arguments:
@@ -131,7 +142,7 @@ def children(ppid):
     """
     return [p.pid for p in psutil.Process(ppid).children()]
 
-def ancestors(pid):
+def ancestors(pid: int) -> list[int]:
     """ancestors(pid) -> int list
 
     Arguments:
@@ -141,6 +152,7 @@ def ancestors(pid):
         List of PIDs of whose parent process is `pid` or an ancestor of `pid`.
 
     Example:
+
         >>> ancestors(os.getpid()) # doctest: +ELLIPSIS
         [..., 1]
     """
@@ -150,7 +162,8 @@ def ancestors(pid):
          pid = parent(pid)
     return pids
 
-def descendants(pid):
+DescendantsMap: TypeAlias = dict[int, 'DescendantsMap']
+def descendants(pid: int) -> DescendantsMap:
     """descendants(pid) -> dict
 
     Arguments:
@@ -160,24 +173,25 @@ def descendants(pid):
         Dictionary mapping the PID of each child of `pid` to it's descendants.
 
     Example:
+
         >>> d = descendants(os.getppid())
         >>> os.getpid() in d.keys()
         True
     """
     this_pid = pid
     allpids = all_pids()
-    ppids = {}
-    def _parent(pid):
+    ppids: dict[int, int] = {}
+    def _parent(pid: int) -> int:
          if pid not in ppids:
              ppids[pid] = parent(pid)
          return ppids[pid]
-    def _children(ppid):
+    def _children(ppid: int) -> list[int]:
          return [pid for pid in allpids if _parent(pid) == ppid]
-    def _loop(ppid):
+    def _loop(ppid: int) -> DescendantsMap:
          return {pid: _loop(pid) for pid in _children(ppid)}
     return _loop(pid)
 
-def exe(pid):
+def exe(pid: int) -> str:
     """exe(pid) -> str
 
     Arguments:
@@ -187,12 +201,13 @@ def exe(pid):
         The path of the binary of the process. I.e. what ``/proc/<pid>/exe`` points to.
 
     Example:
+
         >>> exe(os.getpid()) == os.path.realpath(sys.executable)
         True
     """
     return psutil.Process(pid).exe()
 
-def cwd(pid):
+def cwd(pid: int) -> str:
     """cwd(pid) -> str
 
     Arguments:
@@ -203,12 +218,13 @@ def cwd(pid):
         ``/proc/<pid>/cwd`` points to.
 
     Example:
+
         >>> cwd(os.getpid()) == os.getcwd()
         True
     """
     return psutil.Process(pid).cwd()
 
-def cmdline(pid):
+def cmdline(pid: int) -> list[str]:
     """cmdline(pid) -> str list
 
     Arguments:
@@ -218,12 +234,32 @@ def cmdline(pid):
         A list of the fields in ``/proc/<pid>/cmdline``.
 
     Example:
+
         >>> 'py' in ''.join(cmdline(os.getpid()))
         True
     """
     return psutil.Process(pid).cmdline()
 
-def stat(pid):
+# TODO: Update return type once psutil has better types
+def memory_maps(pid: int) -> list[Any]:
+    """memory_maps(pid) -> list
+    
+    Arguments:
+        pid (int): PID of the process.
+
+    Returns:
+        A list of the memory mappings in the process.
+
+    Example:
+
+        >>> maps = memory_maps(os.getpid())
+        >>> [(m.path, m.perms) for m in maps if '[stack]' in m.path]
+        [('[stack]', 'rw-p')]
+
+    """
+    return psutil.Process(pid).memory_maps(grouped=False)
+
+def stat(pid: int) -> list[str]:
     """stat(pid) -> str list
 
     Arguments:
@@ -233,6 +269,7 @@ def stat(pid):
         A list of the values in ``/proc/<pid>/stat``, with the exception that ``(`` and ``)`` has been removed from around the process name.
 
     Example:
+
         >>> stat(os.getpid())[2]
         'R'
     """
@@ -244,7 +281,7 @@ def stat(pid):
     name = s[i+1:j]
     return s[:i].split() + [name] + s[j+1:].split()
 
-def starttime(pid):
+def starttime(pid: int) -> float:
     """starttime(pid) -> float
 
     Arguments:
@@ -254,12 +291,13 @@ def starttime(pid):
         The time (in seconds) the process started after system boot
 
     Example:
+
         >>> starttime(os.getppid()) <= starttime(os.getpid())
         True
     """
     return psutil.Process(pid).create_time() - psutil.boot_time()
 
-def status(pid):
+def status(pid: int) -> dict[str, str]:
     """status(pid) -> dict
 
     Get the status of a process.
@@ -287,7 +325,44 @@ def status(pid):
             raise
     return out
 
-def tracer(pid):
+def _tracer_windows(pid: int) -> int:
+    assert sys.platform == 'win32'
+    import ctypes
+    from ctypes import wintypes
+
+    def _check_bool(result: Any, func: Any, args: tuple[Any, ...]) -> Any:
+        if not result:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return result
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    OpenProcess = kernel32.OpenProcess 
+    OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    OpenProcess.restype = wintypes.HANDLE
+    OpenProcess.errcheck = _check_bool
+
+    CheckRemoteDebuggerPresent = kernel32.CheckRemoteDebuggerPresent
+    CheckRemoteDebuggerPresent.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    CheckRemoteDebuggerPresent.restype = wintypes.BOOL
+    CheckRemoteDebuggerPresent.errcheck = _check_bool
+
+    CloseHandle = kernel32.CloseHandle
+    CloseHandle.argtypes = [wintypes.HANDLE]
+    CloseHandle.restype = wintypes.BOOL
+    CloseHandle.errcheck = _check_bool
+
+    PROCESS_QUERY_INFORMATION = 0x0400
+    proc_handle = OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+    present = wintypes.BOOL()
+    CheckRemoteDebuggerPresent(proc_handle, ctypes.byref(present))
+    ret = 0
+    if present.value:
+        ret = pid
+    CloseHandle(proc_handle)
+
+    return ret
+
+def tracer(pid: int) -> int | None:
     """tracer(pid) -> int
 
     Arguments:
@@ -297,13 +372,17 @@ def tracer(pid):
         PID of the process tracing `pid`, or None if no `pid` is not being traced.
 
     Example:
+
         >>> tracer(os.getpid()) is None
         True
     """
-    tpid = int(status(pid)['TracerPid'])
+    if sys.platform == 'win32':
+        tpid = _tracer_windows(pid)
+    else:
+        tpid = int(status(pid)['TracerPid'])
     return tpid if tpid > 0 else None
 
-def state(pid):
+def state(pid: int) -> str:
     """state(pid) -> str
 
     Arguments:
@@ -313,12 +392,13 @@ def state(pid):
         State of the process as listed in ``/proc/<pid>/status``.  See `proc(5)` for details.
 
     Example:
+
         >>> state(os.getpid())
         'R (running)'
     """
     return status(pid)['State']
 
-def wait_for_debugger(pid, debugger_pid=None):
+def wait_for_debugger(pid: int, debugger_pid: int | None = None) -> int | None:
     """wait_for_debugger(pid, debugger_pid=None) -> None
 
     Sleeps until the process with PID `pid` is being traced.
@@ -328,7 +408,7 @@ def wait_for_debugger(pid, debugger_pid=None):
         pid (int): PID of the process.
 
     Returns:
-        None
+        The PID of the debugger that attached to the process.
     """
     t = Timeout()
     with t.countdown(timeout=15):
@@ -346,9 +426,11 @@ def wait_for_debugger(pid, debugger_pid=None):
                 else:
                     time.sleep(0.01)
 
-        if tracer(pid):
-            l.success()
-        elif debugger_pid == 0:
-            l.failure("debugger exited! (maybe check /proc/sys/kernel/yama/ptrace_scope)")
-        else:
-            l.failure('Debugger did not attach to pid %d within 15 seconds', pid)
+            tracer_pid = tracer(pid)
+            if tracer_pid:
+                l.success()
+            elif debugger_pid == 0:
+                l.failure("debugger exited! (maybe check /proc/sys/kernel/yama/ptrace_scope)")
+            else:
+                l.failure('Debugger did not attach to pid %d within 15 seconds', pid)
+            return tracer_pid

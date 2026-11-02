@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-#
+#!/usr/bin/env python3
 #  mayhem/datatypes/elf.py
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -29,8 +27,6 @@
 #  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 #  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-from __future__ import division
-
 import ctypes
 
 Elf32_Addr = ctypes.c_uint32
@@ -288,6 +284,10 @@ class constants:
     DF_1_GLOBAUDIT          = 0x01000000
     DF_1_SINGLETON          = 0x02000000
 
+    # DynELF constants
+    DT_GNU_HASH = 0x6ffffef5
+    STN_UNDEF   = 0
+
 
 class Elf32_Ehdr(ctypes.Structure):
     _fields_ = [("e_ident", (ctypes.c_ubyte * 16)),
@@ -399,6 +399,15 @@ class Elf64_Sym(ctypes.Structure):
                 ("st_value", Elf64_Addr),
                 ("st_size", Elf64_Xword),]
 
+class Elf64_Rel(ctypes.Structure):
+    _fields_ = [("r_offset", Elf64_Addr),
+                ("r_info", Elf64_Xword),
+                ("r_addend", Elf64_Sxword),]
+
+class Elf32_Rel(ctypes.Structure):
+    _fields_ = [("r_offset", Elf32_Addr),
+                ("r_info", Elf32_Word),]
+
 class Elf32_Link_Map(ctypes.Structure):
     _fields_ = [("l_addr", Elf32_Addr),
                 ("l_name", Elf32_Addr),
@@ -468,9 +477,6 @@ class Elf32_r_debug(ctypes.Structure):
 class Elf64_r_debug(ctypes.Structure):
     _fields_ = [('r_version', Elf32_Word),
                 ('r_map', Elf64_Addr)]
-
-constants.DT_GNU_HASH = 0x6ffffef5
-constants.STN_UNDEF   = 0
 
 pid_t = ctypes.c_uint32
 
@@ -604,7 +610,8 @@ class user_regs_struct_aarch64(ctypes.Structure):
     def __getattr__(self, name):
         if name.startswith('r'):
             name = 'x' + name[1:]
-            return getattr(name) & 0xffffffff
+            return getattr(self, name) & 0xffffffff
+        raise AttributeError(name)
 
 class elf_prstatus_i386(ctypes.Structure):
     _fields_ = generate_prstatus_common(32, user_regs_struct_i386)
@@ -630,40 +637,16 @@ class Elf64_auxv_t(ctypes.Structure):
     _fields_ = [('a_type', ctypes.c_uint64),
                 ('a_val', ctypes.c_uint64),]
 
-def generate_prpsinfo(long):
-    return [
-        ('pr_state', byte),
-        ('pr_sname', char),
-        ('pr_zomb', byte),
-        ('pr_nice', byte),
-        ('pr_flag', long),
-        ('pr_uid', ctypes.c_ushort),
-        ('pr_gid', ctypes.c_ushort),
-        ('pr_pid', ctypes.c_int),
-        ('pr_ppid', ctypes.c_int),
-        ('pr_pgrp', ctypes.c_int),
-        ('pr_sid', ctypes.c_int),
-        ('pr_fname', char * 16),
-        ('pr_psargs', char * 80)
-    ]
+class elf_siginfo_32(ctypes.Structure):
+    _fields_ = [('si_signo', ctypes.c_uint32),
+                ('si_errno', ctypes.c_uint32),
+                ('si_code', ctypes.c_uint32),
+                ('sigfault_addr', ctypes.c_uint32),
+                ('sigfault_trapno', ctypes.c_uint32)]
 
-class elf_prpsinfo_32(ctypes.Structure):
-    _fields_ = generate_prpsinfo(Elf32_Addr)
-
-class elf_prpsinfo_64(ctypes.Structure):
-    _fields_ = generate_prpsinfo(Elf64_Addr)
-
-def generate_siginfo(int_t, long_t):
-    class siginfo_t(ctypes.Structure):
-        _fields_ = [('si_signo', int_t),
-                    ('si_errno', int_t),
-                    ('si_code', int_t),
-                    ('sigfault_addr', long_t),
-                    ('sigfault_trapno', int_t)]
-    return siginfo_t
-
-class elf_siginfo_32(generate_siginfo(ctypes.c_uint32, ctypes.c_uint32)):
-    pass
-
-class elf_siginfo_64(generate_siginfo(ctypes.c_uint32, ctypes.c_uint64)):
-    pass
+class elf_siginfo_64(ctypes.Structure):
+    _fields_ = [('si_signo', ctypes.c_uint32),
+                ('si_errno', ctypes.c_uint32),
+                ('si_code', ctypes.c_uint32),
+                ('sigfault_addr', ctypes.c_uint64),
+                ('sigfault_trapno', ctypes.c_uint32)]

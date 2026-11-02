@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Read information from Core Dumps.
 
 Core dumps are extremely useful when writing exploits, even outside of
@@ -60,9 +59,6 @@ Module Members
 ----------------------------------------
 
 """
-from __future__ import absolute_import
-from __future__ import division
-
 import collections
 import ctypes
 import glob
@@ -76,7 +72,6 @@ import tempfile
 from io import BytesIO, StringIO
 
 import elftools
-from elftools.common.py3compat import bytes2str
 from elftools.common.utils import roundup
 from elftools.common.utils import struct_parse
 from elftools.construct import CString
@@ -93,6 +88,7 @@ from pwnlib.util.fiddling import b64d
 from pwnlib.util.fiddling import enhex
 from pwnlib.util.fiddling import unhex
 from pwnlib.util.misc import read
+from pwnlib.util.misc import which
 from pwnlib.util.misc import write
 from pwnlib.util.packing import pack
 from pwnlib.util.packing import unpack_many
@@ -106,45 +102,13 @@ prstatus_types = {
     'aarch64': elf_prstatus_aarch64
 }
 
-prpsinfo_types = {
-    32: elf_prpsinfo_32,
-    64: elf_prpsinfo_64,
-}
-
 siginfo_types = {
     32: elf_siginfo_32,
     64: elf_siginfo_64
 }
 
-# Slightly modified copy of the pyelftools version of the same function,
-# until they fix this issue:
-# https://github.com/eliben/pyelftools/issues/93
-def iter_notes(self):
-    """ Iterates the list of notes in the segment.
-    """
-    offset = self['p_offset']
-    end = self['p_offset'] + self['p_filesz']
-    while offset < end:
-        note = struct_parse(
-            self.elffile.structs.Elf_Nhdr,
-            self.stream,
-            stream_pos=offset)
-        note['n_offset'] = offset
-        offset += self.elffile.structs.Elf_Nhdr.sizeof()
-        self.stream.seek(offset)
-        # n_namesz is 4-byte aligned.
-        disk_namesz = roundup(note['n_namesz'], 2)
-        note['n_name'] = bytes2str(
-            CString('').parse(self.stream.read(disk_namesz)))
-        offset += disk_namesz
 
-        desc_data = bytes2str(self.stream.read(note['n_descsz']))
-        note['n_desc'] = desc_data
-        offset += roundup(note['n_descsz'], 2)
-        note['n_size'] = offset - note['n_offset']
-        yield note
-
-class Mapping(object):
+class Mapping:
     """Encapsulates information about a memory mapping in a :class:`Corefile`.
     """
     def __init__(self, core, name, start, stop, flags, page_offset):
@@ -156,7 +120,7 @@ class Mapping(object):
         #: :class:`int`: First mapped byte in the mapping
         self.start = start
 
-        #: :class:`int`: First byte after the end of hte mapping
+        #: :class:`int`: First byte after the end of the mapping
         self.stop = stop
 
         #: :class:`int`: Size of the mapping, in bytes
@@ -271,8 +235,8 @@ class Corefile(ELF):
     Registers can be accessed directly, e.g. via ``core_obj.eax`` and enumerated
     via :data:`Corefile.registers`.
 
-    Memory can be accessed directly via :meth:`.read` or :meth:`.write`, and also
-    via :meth:`.pack` or :meth:`.unpack` or even :meth:`.string`.
+    Memory can be accessed directly via :meth:`pwnlib.elf.elf.ELF.read` or :meth:`pwnlib.elf.elf.ELF.write`, and also
+    via :meth:`pwnlib.elf.elf.ELF.pack` or :meth:`pwnlib.elf.elf.ELF.unpack` or even :meth:`.string`.
 
     Arguments:
         core: Path to the core file.  Alternately, may be a :class:`.process` instance,
@@ -358,7 +322,7 @@ class Corefile(ELF):
         >>> hex(core.exe.address)
         '0x41410000'
 
-        The core file also has registers which can be accessed direclty.
+        The core file also has registers which can be accessed directly.
         Pseudo-registers :attr:`pc` and :attr:`sp` are available on all architectures,
         to make writing architecture-agnostic code more simple.
         If this were an amd64 corefile, we could access e.g. ``core.rax``.
@@ -400,6 +364,7 @@ class Corefile(ELF):
         automatically invokes GDB to attach and dump a corefile.
 
         >>> core = io.corefile
+        >>> io.close()
 
         The corefile can be inspected and read from, and even exposes various mappings
 
@@ -408,8 +373,8 @@ class Corefile(ELF):
         >>> core.exe.data[0:4]
         b'\x7fELF'
 
-        It also supports all of the features of :class:`ELF`, so you can :meth:`.read`
-        or :meth:`.write` or even the helpers like :meth:`.pack` or :meth:`.unpack`.
+        It also supports all of the features of :class:`ELF`, so you can :meth:`pwnlib.elf.elf.ELF.read`
+        or :meth:`pwnlib.elf.elf.ELF.write` or even the helpers like :meth:`pwnlib.elf.elf.ELF.pack` or :meth:`pwnlib.elf.elf.ELF.unpack`.
 
         Don't forget to call :meth:`.ELF.save` to save the changes to disk.
 
@@ -444,7 +409,7 @@ class Corefile(ELF):
         will be loaded.
 
         >>> process('bash').corefile.libc # doctest: +ELLIPSIS
-        Mapping('/.../libc-....so', start=0x..., stop=0x..., size=0x..., flags=..., page_offset=...)
+        Mapping('.../libc...so...', start=0x..., stop=0x..., size=0x..., flags=..., page_offset=...)
 
         The corefile also contains a :attr:`.stack` property, which gives
         us direct access to the stack contents.  On Linux, the very top of the stack
@@ -515,6 +480,22 @@ class Corefile(ELF):
         >>> core.sp in core.stack
         False
 
+        context.disable_corefiles disables the automatic corefile generation
+        for crashed processes. For running processes, io.corefile still invoke
+        GDB to generate a coredump.
+
+        >>> context.clear(arch='amd64')
+        >>> context.disable_corefiles = True
+        >>> elf = ELF.from_assembly(shellcraft.crash())
+        >>> io = elf.process()
+        >>> io.wait(1)
+        >>> io.corefile is None
+        True
+        >>> io = process('bash')
+        >>> core = io.corefile
+        >>> core is not None
+        True
+
         Corefile gracefully handles the stack being filled with garbage, including
         argc / argv / envp being overwritten.
 
@@ -529,7 +510,6 @@ class Corefile(ELF):
         >>> io = elf.process()
         >>> io.wait(2)
         >>> core = io.corefile
-        [!] End of the stack is corrupted, skipping stack parsing (got: 41414141)
         >>> core.argc, core.argv, core.env
         (0, [], {})
         >>> core.stack.data.endswith(b'AAAA')
@@ -588,6 +568,9 @@ class Corefile(ELF):
         # Pointer to the entry point
         self.at_entry = 0
 
+        # Pointer to the vdso
+        self.at_sysinfo_ehdr = None
+
         try:
             super(Corefile, self).__init__(*a, **kw)
         except IOError:
@@ -598,13 +581,12 @@ class Corefile(ELF):
         self._address  = 0
 
         if self.elftype != 'CORE':
-            log.error("%s is not a valid corefile" % self.file.name)
+            log.error("%s is not a valid corefile" % self.path)
 
         if self.arch not in prstatus_types:
-            log.warn_once("%s does not use a supported corefile architecture, registers are unavailable" % self.file.name)
+            log.warn_once("%s does not use a supported corefile architecture, registers are unavailable" % self.path)
 
         prstatus_type = prstatus_types.get(self.arch)
-        prpsinfo_type = prpsinfo_types.get(self.bits)
         siginfo_type = siginfo_types.get(self.bits)
 
         with log.waitfor("Parsing corefile...") as w:
@@ -615,45 +597,38 @@ class Corefile(ELF):
                     continue
 
 
-                # Note that older versions of pyelftools (<=0.24) are missing enum values
-                # for NT_PRSTATUS, NT_PRPSINFO, NT_AUXV, etc.
-                # For this reason, we have to check if note.n_type is any of several values.
-                for note in iter_notes(segment):
-                    if not isinstance(note.n_desc, bytes):
-                        note['n_desc'] = note.n_desc.encode('latin1')
+                for note in segment.iter_notes():
                     # Try to find NT_PRSTATUS.
-                    if prstatus_type and \
-                       note.n_descsz == ctypes.sizeof(prstatus_type) and \
-                       note.n_type in ('NT_GNU_ABI_TAG', 'NT_PRSTATUS'):
+                    if note.n_type == 'NT_PRSTATUS':
                         self.NT_PRSTATUS = note
                         self.prstatus = prstatus_type.from_buffer_copy(note.n_desc)
 
                     # Try to find NT_PRPSINFO
-                    if prpsinfo_type and \
-                       note.n_descsz == ctypes.sizeof(prpsinfo_type) and \
-                       note.n_type in ('NT_GNU_ABI_TAG', 'NT_PRPSINFO'):
+                    if note.n_type == 'NT_PRPSINFO':
                         self.NT_PRPSINFO = note
-                        self.prpsinfo = prpsinfo_type.from_buffer_copy(note.n_desc)
+                        self.prpsinfo = note.n_desc
 
                     # Try to find NT_SIGINFO so we can see the fault
-                    if note.n_type in (0x53494749, 'NT_SIGINFO'):
+                    if note.n_type == 'NT_SIGINFO':
                         self.NT_SIGINFO = note
                         self.siginfo = siginfo_type.from_buffer_copy(note.n_desc)
 
                     # Try to find the list of mapped files
-                    if note.n_type in (constants.NT_FILE, 'NT_FILE'):
+                    if note.n_type == 'NT_FILE':
                         with context.local(bytes=self.bytes):
                             self._parse_nt_file(note)
 
                     # Try to find the auxiliary vector, which will tell us
                     # where the top of the stack is.
-                    if note.n_type in (constants.NT_AUXV, 'NT_AUXV'):
+                    if note.n_type == 'NT_AUXV':
                         self.NT_AUXV = note
                         with context.local(bytes=self.bytes):
                             self._parse_auxv(note)
 
             if not self.stack and self.mappings:
                 self.stack = self.mappings[-1].stop
+                if self.mappings[-1].start == 0xffffffffff600000 and len(self.mappings) > 1:
+                    self.stack = self.mappings[-2].stop
 
             if self.stack and self.mappings:
                 for mapping in self.mappings:
@@ -665,7 +640,7 @@ class Corefile(ELF):
                     log.warn('Could not find the stack!')
                     self.stack = None
 
-            with context.local(bytes=self.bytes, log_level='warn'):
+            with context.local(bytes=self.bytes):
                 try:
                     self._parse_stack()
                 except ValueError:
@@ -683,31 +658,16 @@ class Corefile(ELF):
             self._describe_core()
 
     def _parse_nt_file(self, note):
-        t = tube()
-        t.unrecv(note.n_desc)
-
-        count = t.unpack()
-        page_size = t.unpack()
-
         starts = []
         addresses = {}
 
-        for i in range(count):
-            start = t.unpack()
-            end = t.unpack()
-            offset = t.unpack()
-            starts.append((start, offset))
-
-        for i in range(count):
-            filename = t.recvuntil(b'\x00', drop=True)
+        for vma, filename in zip(note.n_desc.Elf_Nt_File_Entry, note.n_desc.filename):
             if not isinstance(filename, str):
-                filename = filename.decode('utf-8')
-            (start, offset) = starts[i]
-
+                filename = filename.decode('utf-8', 'surrogateescape')
             for mapping in self.mappings:
-                if mapping.start == start:
+                if mapping.start == vma.vm_start:
                     mapping.name = filename
-                    mapping.page_offset = offset
+                    mapping.page_offset = vma.page_offset
 
         self.mappings = sorted(self.mappings, key=lambda m: m.start)
 
@@ -758,7 +718,7 @@ class Corefile(ELF):
     @property
     def libc(self):
         """:class:`Mapping`: First mapping for ``libc.so``"""
-        expr = r'libc\b.*so$'
+        expr = r'^libc\b.*so(?:\.6)?$'
 
         for m in self.mappings:
             if not m.name:
@@ -786,7 +746,7 @@ class Corefile(ELF):
         for m in self.mappings:
             first_segment_for_name.setdefault(m.name, m)
 
-        # Find which segment conains the entry point
+        # Find which segment contains the entry point
         for m in self.mappings:
             if m.start <= self.at_entry < m.stop:
 
@@ -1183,14 +1143,13 @@ class Corefile(ELF):
         pwnlib.gdb.attach(self, exe=self.exe.path)
 
     def __getattr__(self, attribute):
-        if self.prstatus:
-            if hasattr(self.prstatus, attribute):
-                return getattr(self.prstatus, attribute)
+        if attribute.startswith('_') or not self.prstatus:
+            raise AttributeError(attribute)
 
-            if hasattr(self.prstatus.pr_reg, attribute):
-                return getattr(self.prstatus.pr_reg, attribute)
+        if hasattr(self.prstatus, attribute):
+            return getattr(self.prstatus, attribute)
 
-        return super(Corefile, self).__getattribute__(attribute)
+        return getattr(self.prstatus.pr_reg, attribute)
 
     # Override routines which don't make sense for Corefiles
     def _populate_got(*a): pass
@@ -1202,7 +1161,7 @@ class Core(Corefile):
 class Coredump(Corefile):
     """Alias for :class:`.Corefile`"""
 
-class CorefileFinder(object):
+class CorefileFinder:
     def __init__(self, proc):
         if proc.poll() is None:
             log.error("Process %i has not exited" % (proc.pid))
@@ -1388,6 +1347,10 @@ class CorefileFinder(object):
         except Exception:
             pass
 
+        # Convert bytes-like object to string
+        if isinstance(data, bytes):
+            data = data.decode('utf-8')
+
         return data
 
     def systemd_coredump_corefile(self):
@@ -1406,9 +1369,8 @@ class CorefileFinder(object):
                     "coredumpctl",
                     "dump",
                     "--output=%s" % filename,
-                    # Filter coredump by pid and filename
+                    # Filter coredump by pid
                     str(self.pid),
-                    self.basename,
                 ],
                 stdout=open(os.devnull, 'w'),
                 stderr=subprocess.STDOUT,
@@ -1417,6 +1379,38 @@ class CorefileFinder(object):
             return filename
         except subprocess.CalledProcessError as e:
             log.debug("coredumpctl failed with status: %d" % e.returncode)
+
+    def wsl_capture_crash_corefile(self):
+        # Get the temp directory of the current user on Windows.
+        with context.local(os="windows", log_level="error"):
+            with process([which("cmd.exe"), "/U", "/c", "echo %TEMP%"]) as p:
+                windows_temp = p.recvall().decode("utf-16le").strip().split(context.newline.decode())
+            if not windows_temp:
+                log.error("Could not determine Windows temp directory")
+                return None
+            # Convert the C:\... Windows path to a WSL path.
+            with process([which("wslpath"), "-a", "-u", windows_temp[-1]]) as p:
+                windows_temp_path = p.recvallS().strip()
+
+        # The /wsl-capture-crash tool stores the core files in %TEMP%\wsl-crashes
+        wsl_crashes = os.path.join(windows_temp_path, "wsl-crashes")
+        if not os.path.isdir(wsl_crashes):
+            log.debug("WSL crashes directory does not exist: %r", wsl_crashes)
+            return None
+
+        # Format the name
+        corefile_name = 'wsl-crash-*-{pid}-*{basename}*.dmp'
+        corefile_name = corefile_name.format(pid=self.pid, basename=self.basename)
+
+        # Get the full path
+        corefile_path = os.path.join(wsl_crashes, corefile_name)
+
+        log.debug("Trying corefile_path: %r", corefile_path)
+
+        # Glob all of them, return the *most recent* based on numeric sort order.
+        for corefile in sorted(glob.glob(corefile_path), reverse=True):
+            return corefile
+        return None
 
     def native_corefile(self):
         """Find the corefile for a native crash.
@@ -1456,12 +1450,19 @@ class CorefileFinder(object):
                     f.write(apport_core)
                 return filename
 
+            filename = self.apport_coredump()
+            if filename:
+                return filename
+
             # Pretend core_pattern was just 'core', and see if we come up with anything
             self.kernel_core_pattern = 'core'
             return self.native_corefile_pattern()
         elif b'systemd-coredump' in self.kernel_core_pattern:
             log.debug("Found systemd-coredump in core_pattern")
             return self.systemd_coredump_corefile()
+        elif b'/wsl-capture-crash' in self.kernel_core_pattern:
+            log.debug("Found WSL core_pattern")
+            return self.wsl_capture_crash_corefile()
         else:
             log.warn_once("Unsupported core_pattern: %r", self.kernel_core_pattern)
             return None
@@ -1538,6 +1539,53 @@ class CorefileFinder(object):
 
         # Get the full path
         corefile_path = os.path.join(self.cwd, corefile_name)
+
+        log.debug("Trying corefile_path: %r" % corefile_path)
+
+        # Glob all of them, return the *most recent* based on numeric sort order.
+        for corefile in sorted(glob.glob(corefile_path), reverse=True):
+            return corefile
+
+    def apport_coredump(self):
+        """Find new-style apport coredump of executables not belonging
+        to a system package
+        """
+        # Now Ubuntu, which is the most silly distro of all, doesn't follow
+        # anybody else's rules either...
+        # ...and it uses apport FROM SOME OTHER REPO THAN THE DOCS SAY
+        # Hey, thanks for making our lives easier, Canonical :----)
+        # Seriously, why is Ubuntu even considered to be the default distro
+        # on GH Actions?
+        #
+        #     core.<_path_to_target_binary>.<uid>.<boot_id>.<pid>.<timestamp>
+        #
+        # Note that we don't give any fucks about the timestamp, since the PID
+        # should be unique enough that we can just glob.
+
+        boot_id = read('/proc/sys/kernel/random/boot_id').strip().decode()
+
+        # Use the absolute path of the executable
+        # Apport uses the executable's path to determine the core dump filename
+        #
+        # Reference source:
+        # https://github.com/canonical/apport/blob/4bbb179b8f92989bf7c1ee3692074f35d70ef3e8/data/apport#L110
+        # https://github.com/canonical/apport/blob/4bbb179b8f92989bf7c1ee3692074f35d70ef3e8/apport/fileutils.py#L599
+        #
+        # Apport calls `get_core_path` with `options.executable_path`, which corresponds to
+        # the executable's pathname, as specified by the `%E` placeholder
+        # in the core pattern (see `man core` and `apport --help`).
+        path = os.path.abspath(self.exe).replace('/', '_').replace('.', '_')
+
+        # Format the name
+        corefile_name = 'core.{path}.{uid}.{boot_id}.{pid}.*'.format(
+            path=path,
+            uid=self.uid,
+            boot_id=boot_id,
+            pid=self.pid,
+        )
+
+        # Get the full path
+        corefile_path = os.path.join('/var/lib/apport/coredump', corefile_name)
 
         log.debug("Trying corefile_path: %r" % corefile_path)
 

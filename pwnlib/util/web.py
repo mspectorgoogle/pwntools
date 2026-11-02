@@ -1,10 +1,6 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import
-from __future__ import division
-
 import os
-import six
 import tempfile
+from typing import Any
 
 from pwnlib.log import getLogger
 from pwnlib.tubes.buffer import Buffer
@@ -12,7 +8,7 @@ from pwnlib.util.misc import size
 
 log = getLogger(__name__)
 
-def wget(url, save=None, timeout=5, **kwargs):
+def wget(url: str | bytes, save: str | bytes | bool = False, timeout: float | tuple[float, float] | None = 5.0, **kwargs: Any) -> bytes | None:
     r"""wget(url, save=None, timeout=5) -> str
 
     Downloads a file via HTTP/HTTPS.
@@ -21,11 +17,12 @@ def wget(url, save=None, timeout=5, **kwargs):
       url (str): URL to download
       save (str or bool): Name to save as.  Any truthy value
             will auto-generate a name based on the URL.
-      timeout (int): Timeout, in seconds
+      timeout (float, tuple): Timeout, in seconds. Can be a single value for both connect and read, 
+              or a tuple of (connect, read). Set to None to disable timeouts.
 
     Example:
 
-      >>> url    = 'https://httpbin.org/robots.txt'
+      >>> url    = 'https://httpbingo.org/robots.txt'
       >>> result = wget(url, timeout=60)
       >>> result
       b'User-agent: *\nDisallow: /deny\n'
@@ -44,7 +41,7 @@ def wget(url, save=None, timeout=5, **kwargs):
 
         if not response.ok:
             w.failure("Got code %s" % response.status_code)
-            return
+            return None
 
         total_size = int(response.headers.get('content-length',0))
 
@@ -70,7 +67,7 @@ def wget(url, save=None, timeout=5, **kwargs):
 
         # Save to the target file if provided
         if save:
-            if not isinstance(save, (bytes, six.text_type)):
+            if not isinstance(save, (bytes, str)):
                 save = os.path.basename(url)
                 save = save or tempfile.NamedTemporaryFile(dir='.', delete=False).name
             with open(save,'wb+') as f:

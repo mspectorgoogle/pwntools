@@ -45,27 +45,25 @@ the :mod:`pwnlib.adb` module.
     adb.write('/data/local/tmp/foo', 'my data')
 
 """
-from __future__ import absolute_import
-from __future__ import division
 
+import datetime
 import functools
 import glob
 import logging
 import os
 import re
 import shutil
-import six
 import stat
 import tempfile
 import time
 
-import dateutil.parser
-
 from pwnlib import atexit
 from pwnlib import tubes
+from pwnlib.tubes.remote import remote
 from pwnlib.context import LocalContext
 from pwnlib.context import context
 from pwnlib.device import Device
+from pwnlib.exception import PwnlibException
 from pwnlib.log import getLogger
 from pwnlib.protocols.adb import AdbClient
 from pwnlib.util.packing import _decode
@@ -84,7 +82,7 @@ def adb(argv, *a, **kw):
         >>> adb.adb(['shell', 'uname']) # it is better to use adb.process
         b'Linux\n'
     """
-    if isinstance(argv, (bytes, six.text_type)):
+    if isinstance(argv, (bytes, str)):
         argv = [argv]
 
     log.debug("$ " + ' '.join(context.adb + argv))
@@ -122,7 +120,7 @@ def current_device(any=False):
 
         >>> device = adb.current_device(any=True)
         >>> device  # doctest: +ELLIPSIS
-        AdbDevice(serial='emulator-5554', type='device', port='emulator', product='sdk_...phone_armv7', model='sdk ...phone armv7', device='generic')
+        AdbDevice(serial='emulator-5554', type='device', port='emulator', product='sdk_...phone..._...', model='...', device='...')
         >>> device.port
         'emulator'
     """
@@ -252,13 +250,13 @@ class AdbDevice(Device):
 
         >>> device = adb.wait_for_device()
         >>> device.arch
-        'arm'
+        'amd64'
         >>> device.bits
-        32
+        64
         >>> device.os
         'android'
         >>> device.product  # doctest: +ELLIPSIS
-        'sdk_...phone_armv7'
+        'sdk_...phone..._...'
         >>> device.serial
         'emulator-5554'
     """
@@ -319,11 +317,12 @@ class AdbDevice(Device):
             port = int(port)
             try:
                 with remote('localhost', port, level='error') as r:
-                    r.recvuntil('OK')
+                    r.recvuntil(b'OK')
                     r.recvline() # Rest of the line
-                    r.sendline('avd name')
-                    self.avd = r.recvline().strip()
-            except:
+                    r.sendline(b'avd name')
+                    self._avd = r.recvlineS().strip()
+            except (OSError, EOFError, PwnlibException):
+                # ADB device disconnected or not responding, skip AVD name lookup
                 pass
 
         self._initialized = True
@@ -365,7 +364,7 @@ class AdbDevice(Device):
         return AdbDevice(serial, type, **kwargs)
 
     def __wrapped(self, function):
-        """Wrapps a callable in a scope which selects the current device."""
+        """Wraps a callable in a scope which selects the current device."""
         @functools.wraps(function)
         def wrapper(*a, **kw):
             with context.local(device=self):
@@ -373,7 +372,7 @@ class AdbDevice(Device):
         return wrapper
 
     def __getattr__(self, name):
-        """Provides scoped access to ``adb`` module propertise, in the context
+        """Provides scoped access to ``adb`` module properties, in the context
         of this device.
 
         .. doctest::
@@ -384,6 +383,9 @@ class AdbDevice(Device):
             >>> adb.getprop(property) == device.getprop(property)
             True
         """
+        if name.startswith('_'):
+            raise AttributeError(name)
+
         with context.local(device=self):
             g = globals()
 
@@ -834,7 +836,7 @@ def process(argv, *a, **kw):
         >>> print(adb.process(['cat','/proc/version']).recvall().decode('utf-8')) # doctest: +ELLIPSIS
         Linux version ...
     """
-    if isinstance(argv, (bytes, six.text_type)):
+    if isinstance(argv, (bytes, str)):
         argv = [argv]
 
     message = "Starting %s process %r" % ('Android', argv[0])
@@ -876,7 +878,7 @@ def which(name, all = False, *a, **kw):
         >>> adb.which('sh')
         '/system/bin/sh'
         >>> adb.which('sh', all=True)
-        ['/system/bin/sh']
+        ['/system/bin/sh', '/vendor/bin/sh']
 
         >>> adb.which('foobar') is None
         True
@@ -884,15 +886,15 @@ def which(name, all = False, *a, **kw):
         []
     """
     # Unfortunately, there is no native 'which' on many phones.
-    which_cmd = '''
+    which_cmd = fr'''
 (IFS=:
   for directory in $PATH; do
       [ -x "$directory/{name}" ] || continue;
-      echo -n "$directory/{name}\\x00";
+      echo -n "$directory/{name}\x00";
   done
 )
-[ -x "{name}" ] && echo -n "$PWD/{name}\\x00"
-'''.format(name=name)
+[ -x "{name}" ] && echo -n "$PWD/{name}\x00"
+'''
 
     which_cmd = which_cmd.strip()
     data = process(['sh','-c', which_cmd], *a, **kw).recvall()
@@ -984,7 +986,7 @@ def proc_exe(pid):
        :skipif: skip_android
 
         >>> adb.proc_exe(1)
-        b'/init'
+        b'/system/bin/init'
     """
     with context.quiet:
         io  = process(['realpath','/proc/%d/exe' % pid])
@@ -1115,7 +1117,7 @@ def unlock_bootloader():
         if 'unlocked: yes' not in unlocked:
             log.error("Unlock failed")
 
-class Kernel(object):
+class Kernel:
     _kallsyms = None
 
     @property
@@ -1190,7 +1192,7 @@ class Kernel(object):
             'Nexus 7': 'oem uart-on',
         }
 
-        with log.waitfor('Enabling kernel UART'):
+        with log.waitfor('Enabling kernel UART') as w:
 
             if model not in known_commands:
                 log.error("Device UART is unsupported.")
@@ -1225,7 +1227,7 @@ class Kernel(object):
 
 kernel = Kernel()
 
-class Property(object):
+class Property:
     def __init__(self, name=None):
         # Need to avoid overloaded setattr() so we go through __dict__
         self.__dict__['_name'] = name
@@ -1259,7 +1261,7 @@ class Property(object):
             >>> adb.properties.ro.build.version.sdk == "24"
             True
         """
-        if isinstance(other, six.string_types):
+        if isinstance(other, str):
             return str(self) == other
         return super(Property, self).__eq__(other)
 
@@ -1271,8 +1273,32 @@ properties = Property()
 
 def _build_date():
     """Returns the build date in the form YYYY-MM-DD as a string"""
+
+    # Use ro.build.date.utc (integer epoch seconds) which is set by the
+    # AOSP build system and available on all standard Android devices.
+    # This avoids ro.build.date which is locale-dependent and can contain
+    # non-ASCII characters that dateutil cannot parse.  See #2513.
+    utc = getprop('ro.build.date.utc')
+    if utc and utc.strip().isdigit():
+        try:
+            as_datetime = datetime.datetime.fromtimestamp(int(utc.strip()), tz=datetime.timezone.utc)
+            return as_datetime.strftime('%Y-%b-%d')
+        except (OSError, OverflowError, ValueError):
+            pass
+
+    # Fallback for non-standard builds missing ro.build.date.utc.
     as_string = getprop('ro.build.date')
-    as_datetime =  dateutil.parser.parse(as_string)
+    if not as_string:
+        return ''
+    try:
+        import dateutil.parser
+    except ImportError:
+        log.exception("dateutil is required to parse ro.build.date since ro.build.date.utc is missing.  Please install it with 'pip install python-dateutil'")
+
+    try:
+        as_datetime = dateutil.parser.parse(as_string)
+    except (ValueError, OverflowError):
+        return as_string
     return as_datetime.strftime('%Y-%b-%d')
 
 def find_ndk_project_root(source):
@@ -1361,14 +1387,18 @@ def compile(source):
         >>> filename = adb.compile(temp)
         >>> sent = adb.push(filename, "/data/local/tmp")
         >>> adb.process(sent).recvall() # doctest: +ELLIPSIS
-        b'... /system/bin/linker\n...'
+        b'... /system/lib64/libc++.so\n...'
     """
 
     ndk_build = misc.which('ndk-build')
     if not ndk_build:
         # Ensure that we can find the NDK.
-        ndk = os.environ.get('NDK', None)
-        if ndk is None:
+        for envvar in ('NDK', 'ANDROID_NDK', 'ANDROID_NDK_ROOT',
+                       'ANDROID_NDK_HOME', 'ANDROID_NDK_LATEST_HOME'):
+            ndk = os.environ.get(envvar)
+            if ndk is not None:
+                break
+        else:
             log.error('$NDK must be set to the Android NDK directory')
         ndk_build = os.path.join(ndk, 'ndk-build')
 
@@ -1416,7 +1446,7 @@ def compile(source):
 
     return output[0]
 
-class Partition(object):
+class Partition:
     def __init__(self, path, name, blocks=0):
         self.path = path
         self.name = name
@@ -1468,7 +1498,7 @@ def readlink(path):
 
     return path.decode()
 
-class Partitions(object):
+class Partitions:
     """Enable access to partitions
 
     Example:
@@ -1483,8 +1513,9 @@ class Partitions(object):
     @context.quietfunc
     def by_name_dir(self):
         try:
-            return next(find('/dev/block/platform','by-name'))
-        except StopIteration:
+            with context.local(log_level=logging.FATAL):
+                return next(find('/dev/block/platform','by-name'))
+        except (StopIteration, PwnlibException):
             return '/dev/block'
 
     @context.quietfunc
@@ -1513,7 +1544,7 @@ class Partitions(object):
         return iter(names)
 
     def __getattr__(self, attr):
-        if attr.startswith("_"):
+        if attr.startswith('_'):
             raise AttributeError(attr)
 
         for name in self:
@@ -1546,7 +1577,7 @@ def install(apk, *arguments):
     This is a wrapper around 'pm install', which backs 'adb install'.
 
     Arguments:
-        apk(str): Path to the APK to intall (e.g. ``'foo.apk'``)
+        apk(str): Path to the APK to install (e.g. ``'foo.apk'``)
         arguments: Supplementary arguments to 'pm install',
             e.g. ``'-l', '-g'``.
     """
@@ -1554,9 +1585,9 @@ def install(apk, *arguments):
         log.error("APK must have .apk extension")
 
     basename = os.path.basename(apk)
-    target_path = '/data/local/tmp/{}.apk'.format(basename)
+    target_path = f'/data/local/tmp/{basename}.apk'
 
-    with log.progress("Installing APK {}".format(basename)) as p:
+    with log.progress(f"Installing APK {basename}") as p:
         with context.quiet:
             p.status('Copying APK to device')
             push(apk, target_path)
@@ -1577,14 +1608,17 @@ def uninstall(package, *arguments):
         package(str): Name of the package to uninstall (e.g. ``'com.foo.MyPackage'``)
         arguments: Supplementary arguments to ``'pm install'``, e.g. ``'-k'``.
     """
-    with log.progress("Uninstalling package {}".format(package)):
+    with log.progress(f"Uninstalling package {package}"):
         with context.quiet:
             return process(['pm','uninstall',package] + list(arguments)).recvall()
 
 @context.quietfunc
 def packages():
     """Returns a list of packages installed on the system"""
-    packages = process(['pm', 'list', 'packages']).recvall()
+    # Decodes the received bytes as UTF-8 per:
+    # https://developer.android.com/reference/java/nio/charset/Charset#defaultCharset()
+    # where it is specified that UTF-8 is the default charset for Android.
+    packages = process(['pm', 'list', 'packages']).recvall().decode('utf-8')
     return [line.split('package:', 1)[-1] for line in packages.splitlines()]
 
 @context.quietfunc
@@ -1592,4 +1626,3 @@ def version():
     """Returns rthe platform version as a tuple."""
     prop = getprop('ro.build.version.release')
     return [int(v) for v in prop.split('.')]
-

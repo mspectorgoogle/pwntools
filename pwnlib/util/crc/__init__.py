@@ -12,14 +12,11 @@ the crc32-sum of ``'A'*40000``.
 An obvious optimization would be to actually generate some lookup-tables.
 
 This doctest is to ensure that the known data are accurate:
+
     >>> known = sys.modules['pwnlib.util.crc.known']
     >>> known.all_crcs == known.generate()
     True
 """
-from __future__ import absolute_import
-from __future__ import division
-
-import six
 import sys
 import types
 
@@ -29,7 +26,7 @@ from pwnlib.util import safeeval
 from pwnlib.util.crc import known
 
 
-class BitPolynom(object):
+class BitPolynom:
     """Class for representing GF(2)[X], i.e. the field of polynomials over
     GF(2).
 
@@ -72,19 +69,21 @@ class BitPolynom(object):
 
 
     def __init__(self, n):
-        if isinstance(n, (bytes, six.text_type)):
+        if isinstance(n, (bytes, bytearray, str)):
+            from pwnlib.util.packing import _need_text
+            n = _need_text(n)
             self.n = 0
             x = BitPolynom(2)
             try:
                 for p in n.split('+'):
                     k = safeeval.values(p.strip(), {'x': x, 'X': x})
-                    assert isinstance(k, (BitPolynom,)+six.integer_types)
+                    assert isinstance(k, (BitPolynom, int))
                     k = int(k)
                     assert k >= 0
                     self.n ^= k
             except (ValueError, NameError, AssertionError):
                 raise ValueError("Not a valid polynomial: %s" % n)
-        elif isinstance(n, six.integer_types):
+        elif isinstance(n, int):
             if n >= 0:
                 self.n = n
             else:
@@ -269,7 +268,7 @@ class Module(types.ModuleType):
         """A generic CRC-sum function.
 
         This is suitable to use with:
-        http://reveng.sourceforge.net/crc-catalogue/all.htm
+        https://reveng.sourceforge.io/crc-catalogue/all.htm
 
         The "check" value in the document is the CRC-sum of the string "123456789".
 
@@ -294,7 +293,7 @@ class Module(types.ModuleType):
             # refin is not meaningful in this case
             inlen = len(data)
             p = BitPolynom(int(''.join('1' if v else '0' for v in data), 2))
-        elif isinstance(data, six.binary_type):
+        elif isinstance(data, bytes):
             inlen = len(data)*8
             if refin:
                 data = fiddling.bitswap(data)
@@ -338,6 +337,7 @@ class Module(types.ModuleType):
             data(str): The data to checksum.
 
         Example:
+
             >>> print(%s(b'123456789'))
             %d
     """ % (name, name, polynom, width, init, refin, refout, xorout, extra_doc, name, check)
@@ -354,13 +354,14 @@ class Module(types.ModuleType):
             data(str): The data to checksum.
 
         Example:
+
             >>> print(cksum(b'123456789'))
             930766865
         """
 
         l = len(data)
         data += packing.pack(l, 'all', endian='little', sign=False)
-        return crc.crc_32_posix(data)
+        return crc.crc_32_cksum(data)
 
     @staticmethod
     def find_crc_function(data, checksum):
@@ -371,6 +372,7 @@ class Module(types.ModuleType):
             data(str): Data for which the checksum is known.
 
         Example:
+
             >>> find_crc_function(b'test', 46197)
             [<function crc_crc_16_dnp at ...>]
         """

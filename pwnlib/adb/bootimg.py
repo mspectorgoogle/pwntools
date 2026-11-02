@@ -1,5 +1,3 @@
-from __future__ import division
-
 import ctypes
 
 BOOT_MAGIC = b"ANDROID!"
@@ -35,7 +33,7 @@ class boot_img_hdr(ctypes.Structure):
         ('extra_cmdline', ctypes.c_char * BOOT_EXTRA_ARGS_SIZE),
     ]
 
-class BootImage(object):
+class BootImage:
     def __init__(self, data):
         self.data = data
         self.header = boot_img_hdr.from_buffer_copy(data)
@@ -46,7 +44,7 @@ class BootImage(object):
         self.kernel = self.data[PAGE:PAGE+self.kernel_size]
 
     def __getattr__(self, name):
-        value = getattr(self.header, name, None)
-        if value is not None:
-            return value
-        return getattr(super(BootImage, self), name)
+        if name.startswith('_'):
+            raise AttributeError(name)
+
+        return getattr(self.header, name)

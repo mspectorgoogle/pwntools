@@ -23,7 +23,6 @@ __all__ = [
     'libcdb',
     'log',
     'memleak',
-    'pep237',
     'regsort',
     'replacements',
     'rop',
@@ -36,6 +35,7 @@ __all__ = [
     'util',
     'update',
     'version',
+    'windbg',
 ]
 
 from . import args

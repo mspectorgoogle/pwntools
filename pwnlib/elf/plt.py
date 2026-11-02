@@ -1,6 +1,5 @@
 """Emulates instructions in the PLT to locate symbols more accurately.
 """
-from __future__ import division
 import logging
 
 from pwnlib.args import args
@@ -53,8 +52,39 @@ def emulate_plt_instructions(elf, got, address, data, targets):
 
     return rv
 
+
+def __ensure_memory_to_run_unicorn():
+    """
+    Check if there is enough memory to run Unicorn Engine.
+    Unicorn Engine requires 1GB of memory to run, if there isn't enough memory it calls exit(1).
+
+    This is a bug in Unicorn Engine, see: https://github.com/unicorn-engine/unicorn/issues/1766
+    """
+    try:
+        from mmap import mmap, MAP_ANON, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE
+
+        mm = mmap(
+            -1, 1024 * 1024 * 1024, MAP_PRIVATE | MAP_ANON, PROT_WRITE | PROT_READ
+        )
+        mm.close()
+    except OSError:
+        raise OSError("Cannot allocate 1GB memory to run Unicorn Engine")
+    except ImportError:
+        # Can only mmap files on Windows, would need to use VirtualAlloc.
+        pass
+
+
 def prepare_unicorn_and_context(elf, got, address, data):
     import unicorn as U
+
+    if elf.arch in ('mips', 'mips64'):
+        # Unicorn 2.1.3 and 2.1.4 have a crashing bug when trying to emulate MIPS.
+        # https://github.com/unicorn-engine/unicorn/issues/2134
+        if U.UC_VERSION_MAJOR == 2 and U.UC_VERSION_MINOR == 1 and U.UC_VERSION_PATCH in (3, 4):
+            raise OSError("Unicorn Engine 2.1.3 and 2.1.4 have a crashing bug when emulating MIPS, please install an earlier or later version: https://github.com/unicorn-engine/unicorn/issues/2134")
+
+
+    __ensure_memory_to_run_unicorn()
 
     # Instantiate the emulator with the correct arguments for the current
     # architecutre.
@@ -64,8 +94,12 @@ def prepare_unicorn_and_context(elf, got, address, data):
         'arm': U.UC_ARCH_ARM,
         'i386': U.UC_ARCH_X86,
         'mips': U.UC_ARCH_MIPS,
+        'mips64': U.UC_ARCH_MIPS,
         # 'powerpc': U.UC_ARCH_PPC, <-- Not actually supported
         'thumb': U.UC_ARCH_ARM,
+        'riscv32': U.UC_ARCH_RISCV,
+        'riscv64': U.UC_ARCH_RISCV,
+        # 'loongarch64': U.UC_ARCH_LOONGARCH, <-- Not actually supported
     }.get(elf.arch, None)
 
     if arch is None:
@@ -119,18 +153,6 @@ def prepare_unicorn_and_context(elf, got, address, data):
 
         uc.mem_write(got, p_magic)
 
-        # Separately, Unicorn is apparently unable to hook unmapped memory
-        # accesses on MIPS.  So we also have to map the page that contains
-        # the magic address.
-        start = magic_addr & (~0xfff)
-        try:
-            uc.mem_map(start, 0x1000)
-        except Exception:
-            # Ignore double-mapping
-            pass
-        trap = packing.p32(0x34000000, endian=elf.endian)
-        uc.mem_write(magic_addr, trap)
-
     return uc, uc.context_save()
 
 
@@ -154,8 +176,8 @@ def emulate_plt_instructions_inner(uc, elf, got, pc, data):
         return False
 
     hooks = [
-        uc.hook_add(U.UC_HOOK_MEM_READ | U.UC_HOOK_MEM_READ_UNMAPPED,
-                    hook_mem, stopped_addr),
+        uc.hook_add(U.UC_HOOK_MEM_READ, hook_mem, stopped_addr),
+        uc.hook_add(U.UC_HOOK_MEM_READ_UNMAPPED, hook_mem, stopped_addr),
     ]
 
     # callback for tracing instructions

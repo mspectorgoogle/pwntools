@@ -1,18 +1,14 @@
-# -*- coding: utf-8 -*-
 """Abstracting ROP calls
 """
-from __future__ import division
-
 from pwnlib.abi import ABI
 from pwnlib.context import context
+from pwnlib.internal.typing import ASCIIStr
 from pwnlib.util import packing
 
-import six
-
-from pwnlib.util.misc import python_2_bytes_compatible, align
+from pwnlib.util.misc import align
 
 
-class Unresolved(object):
+class Unresolved:
     """
     Encapsulates logic for deferring evaluation of a value used
     in a ROP chain which is in some way self-referential.
@@ -58,7 +54,6 @@ class StackAdjustment(Unresolved):
     pass
 
 
-@python_2_bytes_compatible
 class AppendedArgument(Unresolved):
     r"""
     Encapsulates information about a pointer argument, and the data
@@ -88,34 +83,28 @@ class AppendedArgument(Unresolved):
         >>> u.resolve()
         [1008, 1016, 1024, 1032, 1040, 1048, 1056, 1064, b'pointers!\x00$$$$$$']
     """
-    #: Symbolic name of the value.
-    name = None
-
     #: The values to be placed at a known location
     #:
     #: A list of any of the following types:
     #: - int
     #: - str
     #: - UnresolvedArgument (allows nesting)
-    values = []
+    values: list[int | ASCIIStr | Unresolved]
 
     #: The size of the fully-resolved argument, in bytes
-    size = 0
-
-    #: Absolute address of the target data in memory.
-    #: When modified, updates recursively.
-    address = 0
+    size: int
 
     def __init__(self, value, address = 0):
         if not isinstance(value, (list, tuple)):
             value = [value]
         self.values = []
+        self.size = 0
         self.address = address
         for v in value:
             if isinstance(v, (list, tuple)):
                 self.size += context.bytes
             else:
-                if isinstance(v, six.text_type):
+                if isinstance(v, str):
                     v = packing._need_bytes(v)
                 try:
                     self.size += align(context.bytes, len(v))
@@ -131,6 +120,10 @@ class AppendedArgument(Unresolved):
 
     @property
     def address(self):
+        """
+        Absolute address of the target data in memory.
+        When modified, updates recursively.
+        """
         return self._address
 
     @address.setter
@@ -148,7 +141,7 @@ class AppendedArgument(Unresolved):
     def local(self, address):
         original = self.address
 
-        class LocalAddress(object):
+        class LocalAddress:
 
             def __enter__(*a, **kw):
                 self.address = address
@@ -173,9 +166,9 @@ class AppendedArgument(Unresolved):
             self.address = addr
             rv = [None] * len(self.values)
             for i, value in enumerate(self.values):
-                if isinstance(value, six.integer_types):
+                if isinstance(value, int):
                     rv[i] = value
-                elif isinstance(value, six.text_type):
+                elif isinstance(value, str):
                     value = packing._need_bytes(value)
                 if isinstance(value, (bytes, bytearray)):
                     value += b'\x00'
@@ -197,13 +190,13 @@ class AppendedArgument(Unresolved):
         return packing.flat(self.resolve())
 
     def __repr__(self):
-        if isinstance(self.address, six.integer_types):
+        if isinstance(self.address, int):
             return '%s(%r, %#x)' % (self.__class__.__name__, self.values, self.address)
         else:
             return '%s(%r, %r)' % (self.__class__.__name__, self.values, self.address)
 
 
-class Call(object):
+class Call:
     """
     Encapsulates ABI-agnostic information about a function call, which is
     to be executed with ROP.
@@ -227,24 +220,30 @@ class Call(object):
     args = []
 
     def __init__(self, name, target, args, abi=None, before=()):
-        assert isinstance(name, (bytes, six.text_type))
-        # assert isinstance(target, six.integer_types)
+        assert isinstance(name, (bytes, str))
         assert isinstance(args, (list, tuple))
         self.abi  = abi or ABI.default()
         self.name = name
         self.target = target
         self.args = list(args)
         for i, arg in enumerate(args):
-            if not isinstance(arg, six.integer_types+(Unresolved,)):
+            if not isinstance(arg, (int, Unresolved)):
                 self.args[i] = AppendedArgument(arg)
         self.stack_arguments_before = before
 
     def __repr__(self):
-        fmt = "%#x" if isinstance(self.target, six.integer_types) else "%r"
+        fmt = "%#x" if isinstance(self.target, int) else "%r"
         return '%s(%r, %s, %r)' % (self.__class__.__name__,
                                     self.name,
                                     fmt % self.target,
                                     self.args)
+
+    def is_flat(self):
+        if isinstance(self, (int, Unresolved)):
+            return True
+        if not isinstance(self, Call):
+            return False
+        return bool(self.args or self.stack_arguments_before)
 
     @property
     def register_arguments(self):
@@ -264,7 +263,7 @@ class Call(object):
             return x
 
     def __str__(self):
-        fmt = "%#x" if isinstance(self.target, six.integer_types) else "%r"
+        fmt = "%#x" if isinstance(self.target, int) else "%r"
         args = []
         for arg in self.args:
             args.append(self._special_repr(arg))
@@ -272,7 +271,7 @@ class Call(object):
         name = self.name or (fmt % self.target)
         arg_str = []
         for arg in args:
-            if isinstance(arg, six.integer_types) and arg > 0x100:
+            if isinstance(arg, int) and arg > 0x100:
                 arg_str.append(hex(arg))
             else:
                 arg_str.append(str(arg))

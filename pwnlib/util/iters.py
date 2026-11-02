@@ -1,17 +1,15 @@
 """
 This module includes and extends the standard module :mod:`itertools`.
 """
-from __future__ import absolute_import
-from __future__ import division
-
 import collections
 import copy
+import marshal
 import multiprocessing
 import operator
 import random
 import time
+import types
 from itertools import *
-from six.moves import map, filter, filterfalse, range, zip, zip_longest
 
 from pwnlib.context import context
 from pwnlib.log import getLogger
@@ -27,7 +25,6 @@ __all__ = [
     'group'                                  ,
     'iter_except'                            ,
     'lexicographic'                          ,
-    'lookahead'                              ,
     'nth'                                    ,
     'pad'                                    ,
     'pairwise'                               ,
@@ -53,11 +50,8 @@ __all__ = [
     'cycle'                                  ,
     'dropwhile'                              ,
     'groupby'                                ,
-    'filter'                                 ,
     'filterfalse'                            ,
-    'map'                                    ,
     'islice'                                 ,
-    'zip'                                    ,
     'zip_longest'                            ,
     'permutations'                           ,
     'product'                                ,
@@ -84,6 +78,7 @@ def take(n, iterable):
       `n` elements in `iterable` they will all be returned.
 
     Examples:
+
       >>> take(2, range(10))
       [0, 1]
       >>> i = count()
@@ -107,6 +102,7 @@ def tabulate(func, start = 0):
       An iterator with the elements ``func(start), func(start + 1), ...``.
 
     Examples:
+
       >>> take(2, tabulate(str))
       ['0', '1']
       >>> take(5, tabulate(lambda x: x**2, start = 1))
@@ -128,6 +124,7 @@ def consume(n, iterator):
       :const:`None`.
 
     Examples:
+
       >>> i = count()
       >>> consume(5, i)
       >>> next(i)
@@ -168,6 +165,7 @@ def nth(n, iterable, default = None):
       few elements.
 
     Examples:
+
       >>> nth(2, [0, 1, 2, 3])
       2
       >>> nth(2, [0, 1], 42)
@@ -195,6 +193,7 @@ def quantify(iterable, pred = bool):
       :const:`True`.
 
     Examples:
+
       >>> quantify([1, 2, 3, 4], lambda x: x % 2 == 0)
       2
       >>> quantify(['1', 'two', '3', '42'], str.isdigit)
@@ -217,6 +216,7 @@ def pad(iterable, value = None):
       `value` indefinitely.
 
     Examples:
+
       >>> take(3, pad([1, 2]))
       [1, 2, None]
       >>> i = pad(iter([1, 2, 3]), 42)
@@ -243,6 +243,7 @@ def cyclen(n, iterable):
       times.
 
     Examples:
+
       >>> take(4, cyclen(2, [1, 2]))
       [1, 2, 1, 2]
       >>> list(cyclen(10, []))
@@ -263,6 +264,7 @@ def dotproduct(x, y):
       The dot product of `x` and `y`, i.e.: ``x[0] * y[0] + x[1] * y[1] + ...``.
 
     Example:
+
       >>> dotproduct([1, 2, 3], [4, 5, 6])
       ... # 1 * 4 + 2 * 5 + 3 * 6 == 32
       32
@@ -284,6 +286,7 @@ def flatten(xss):
       `xss`.
 
     Examples:
+
       >>> list(flatten([[1, 2], [3, 4]]))
       [1, 2, 3, 4]
       >>> take(6, flatten([[43, 42], [41, 40], count()]))
@@ -309,6 +312,7 @@ def repeat_func(func, *args, **kwargs):
       **kwargs)`` repeatedly.
 
     Examples:
+
       >>> def f(x):
       ...     x[0] += 1
       ...     return x[0]
@@ -335,27 +339,6 @@ def repeat_func(func, *args, **kwargs):
     else:
         return starmap(func, repeat(args))
 
-def pairwise(iterable):
-    """pairwise(iterable) -> iterator
-
-    Arguments:
-      iterable:  An iterable.
-
-    Returns:
-      An iterator whoose elements are pairs of neighbouring elements of
-      `iterable`.
-
-    Examples:
-      >>> list(pairwise([1, 2, 3, 4]))
-      [(1, 2), (2, 3), (3, 4)]
-      >>> i = starmap(operator.add, pairwise(count()))
-      >>> take(5, i)
-      [1, 3, 5, 7, 9]
-    """
-    a, b = tee(iterable)
-    next(b, None)
-    return zip(a, b)
-
 def group(n, iterable, fill_value = None):
     """group(n, iterable, fill_value = None) -> iterator
 
@@ -372,6 +355,7 @@ def group(n, iterable, fill_value = None):
       An iterator whoose elements are `n`-tuples of the elements of `iterable`.
 
     Examples:
+
       >>> list(group(2, range(5)))
       [(0, 1), (2, 3), (4, None)]
       >>> take(3, group(2, count()))
@@ -395,6 +379,7 @@ def roundrobin(*iterables):
       fashion.
 
     Examples:
+
       >>> ''.join(roundrobin('ABC', 'D', 'EF'))
       'ADEBFC'
       >>> ''.join(take(10, roundrobin('ABC', 'DE', repeat('x'))))
@@ -424,6 +409,7 @@ def powerset(iterable, include_empty = True):
       The powerset of `iterable` as an interator of tuples.
 
     Examples:
+
       >>> list(powerset(range(3)))
       [(), (0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2)]
       >>> list(powerset(range(2), include_empty = False))
@@ -452,6 +438,7 @@ def unique_everseen(iterable, key = None):
       An iterator of the unique elements in `iterable`.
 
     Examples:
+
       >>> ''.join(unique_everseen('AAAABBBCCDAABBB'))
       'ABCD'
       >>> ''.join(unique_everseen('ABBCcAD', str.lower))
@@ -487,6 +474,7 @@ def unique_justseen(iterable, key = None):
       An iterator of the unique elements in `iterable`.
 
     Examples:
+
       >>> ''.join(unique_justseen('AAAABBBCCDAABBB'))
       'ABCDAB'
       >>> ''.join(unique_justseen('ABBCcAD', str.lower))
@@ -512,6 +500,7 @@ def unique_window(iterable, window, key = None):
       An iterator of the unique elements in `iterable`.
 
     Examples:
+
       >>> ''.join(unique_window('AAAABBBCCDAABBB', 6))
       'ABCDA'
       >>> ''.join(unique_window('ABBCcAD', 5, str.lower))
@@ -550,6 +539,7 @@ def iter_except(func, exception):
       exception matching `exception` is raised.
 
     Examples:
+
       >>> s = {1, 2, 3}
       >>> i = iter_except(s.pop, KeyError)
       >>> next(i)
@@ -580,6 +570,7 @@ def random_product(*args, **kwargs):
       A random element from ``itertools.product(*args, repeat = repeat)``.
 
     Examples:
+
       >>> args = (range(2), range(2))
       >>> random_product(*args) in {(0, 0), (0, 1), (1, 0), (1, 1)}
       True
@@ -607,6 +598,7 @@ def random_permutation(iterable, r = None):
       A random element from ``itertools.permutations(iterable, r = r)``.
 
     Examples:
+
       >>> random_permutation(range(2)) in {(0, 1), (1, 0)}
       True
       >>> random_permutation(range(10), r = 2) in permutations(range(10), r = 2)
@@ -627,6 +619,7 @@ def random_combination(iterable, r):
       A random element from ``itertools.combinations(iterable, r = r)``.
 
     Examples:
+
       >>> random_combination(range(2), 2)
       (0, 1)
       >>> random_combination(range(10), r = 2) in combinations(range(10), r = 2)
@@ -649,6 +642,7 @@ def random_combination_with_replacement(iterable, r):
       r = r)``.
 
     Examples:
+
       >>> cs = {(0, 0), (0, 1), (1, 1)}
       >>> random_combination_with_replacement(range(2), 2) in cs
       True
@@ -661,36 +655,6 @@ def random_combination_with_replacement(iterable, r):
     indices = sorted(random.randrange(n) for i in range(r))
     return tuple(pool[i] for i in indices)
 
-def lookahead(n, iterable):
-    """lookahead(n, iterable) -> object
-
-    Inspects the upcoming element at index `n` without advancing the iterator.
-    Raises ``IndexError`` if `iterable` has too few elements.
-
-    Arguments:
-      n(int):  Index of the element to return.
-      iterable:  An iterable.
-
-    Returns:
-      The element in `iterable` at index `n`.
-
-    Examples:
-      >>> i = count()
-      >>> lookahead(4, i)
-      4
-      >>> next(i)
-      0
-      >>> i = count()
-      >>> nth(4, i)
-      4
-      >>> next(i)
-      5
-      >>> lookahead(4, i)
-      10
-    """
-    for value in islice(copy.copy(iterable), n, None):
-        return value
-    raise IndexError(n)
 
 def lexicographic(alphabet):
     """lexicographic(alphabet) -> iterator
@@ -706,6 +670,7 @@ def lexicographic(alphabet):
       order.
 
     Example:
+
       >>> take(8, map(lambda x: ''.join(x), lexicographic('01')))
       ['', '0', '1', '00', '01', '10', '11', '000']
     """
@@ -726,6 +691,7 @@ def chained(func):
       values from ``func(*args, **kwargs)``.
 
     Example:
+
       >>> @chained
       ... def g():
       ...     for x in count():
@@ -771,6 +737,7 @@ def bruteforce(func, alphabet, length, method = 'upto', start = None, databag = 
       if the search space was exhausted.
 
     Example:
+
       >>> bruteforce(lambda x: x == 'yes', string.ascii_lowercase, length=5)
       'yes'
     """
@@ -851,6 +818,54 @@ def _mbruteforcewrap(func, alphabet, length, method, start, databag):
     databag["result"] = res
 
 
+class CustomPickler:
+    def __init__(self, *reduction):
+        self.reduction = reduction
+
+    def __reduce__(self):
+        return self.reduction
+
+    def __repr__(self):
+        return self.__class__.__name__ + repr(self.reduction)
+
+
+def construct_func(*args):
+    return types.FunctionType(*args)
+
+
+class PicklableFunc:
+    def __init__(self, f):
+        self.f = f
+
+    def __call__(self, *a, **kw):
+        return self.f(*a, **kw)
+
+    def __getattr__(self, a):
+        return getattr(self.f, a)
+
+    def __reduce__(self):
+        # Constructor types.FunctionType tries to be __main__.function;
+        # globs could likewise be <module>.__dict__.  Neither
+        #   type('FunctionType', (), {'__module__':'types'})
+        # nor
+        #   def __reduce__(self): return "FunctionType"
+        # works because of checks for identity :(
+        globs = CustomPickler(vars, (CustomPickler(__import__, (self.f.__module__ or '__main__',)),))
+        return type(self), (CustomPickler(
+            construct_func,  # ideally self.f.__class__
+                             # but types.FunctionType tries to be __main__.function
+            (
+                CustomPickler(marshal.loads, (marshal.dumps(self.f.__code__),)),
+                globs,
+                self.f.__name__,
+                self.f.__defaults__,
+                self.f.__closure__,
+                self.f.__kwdefaults__,
+            ),
+            self.f.__dict__,
+        ),)
+
+
 def mbruteforce(func, alphabet, length, method = 'upto', start = None, threads = None):
     """mbruteforce(func, alphabet, length, method = 'upto', start = None, threads = None)
 
@@ -861,6 +876,10 @@ def mbruteforce(func, alphabet, length, method = 'upto', start = None, threads =
       threads: Amount of threads to spawn, default is the amount of cores.
 
     Example:
+
+    .. doctest::
+      :options: +POSIX +TODO
+
       >>> mbruteforce(lambda x: x == 'hello', string.ascii_lowercase, length = 10)
       'hello'
       >>> mbruteforce(lambda x: x == 'hello', 'hlo', 5, 'downfrom') is None
@@ -886,6 +905,9 @@ def mbruteforce(func, alphabet, length, method = 'upto', start = None, threads =
 
     (i2, N2) = start
     totalchunks = threads * N2
+
+    if isinstance(func, types.FunctionType):
+        func = PicklableFunc(func)
 
     for i in range(threads):
         shareddata[i] = multiprocessing.Manager().dict()

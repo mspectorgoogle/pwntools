@@ -1,4 +1,4 @@
-<%page args="binary, host=None, port=None, user=None, password=None, remote_path=None, quiet=False"/>\
+<%page args="binary, host=None, port=None, user=None, password=None, libc=None, remote_path=None, quiet=False"/>\
 <%
 import os
 import sys
@@ -31,9 +31,9 @@ elif host and not port:
 remote_path = remote_path or exe
 password = password or 'secret1234'
 binary_repr = repr(binary)
+libc_repr = repr(libc)
 %>\
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 %if not quiet:
 # This exploit template was generated via:
 # $ ${' '.join(map(sh_string, argv))}
@@ -43,8 +43,8 @@ from pwn import *
 %if not quiet:
 # Set up pwntools for the correct architecture
 %endif
-%if ctx.binary:
-exe = context.binary = ELF(${binary_repr})
+%if ctx.binary or not host:
+exe = context.binary = ELF(args.EXE or ${binary_repr})
 <% binary_repr = 'exe.path' %>
 %else:
 context.update(arch='i386')
@@ -53,12 +53,15 @@ exe = ${binary_repr}
 %endif
 
 %if not quiet:
-# Many built-in settings can be controlled on the command-line and show up
-# in "args".  For example, to dump all data sent/received, and disable ASLR
-# for all created processes...
+# Many built-in settings can be controlled on the command-line.  Reserved
+# "magic arguments" such as DEBUG and NOASLR adjust pwntools' behavior via
+# "context" (e.g. context.log_level, context.aslr) and are NOT stored in
+# "args"; other arguments (HOST, PORT, EXE, ...) show up in "args".  For
+# example, to dump all data sent/received, and disable ASLR for all created
+# processes...
 # ./exploit.py DEBUG NOASLR
 %if host or port or user:
-# ./exploit.py GDB HOST=example.com PORT=4141
+# ./exploit.py GDB HOST=example.com PORT=4141 EXE=/tmp/executable
 %endif
 %endif
 %if host:
@@ -81,6 +84,31 @@ shell = None
 if not args.LOCAL:
     shell = ssh(user, host, port, password)
     shell.set_working_directory(symlink=True)
+%endif
+
+%if libc:
+%if not quiet:
+# Use the specified remote libc version unless explicitly told to use the
+# local system version with the `LOCAL_LIBC` argument.
+# ./exploit.py LOCAL LOCAL_LIBC
+%endif
+if args.LOCAL_LIBC:
+    libc = exe.libc
+%if host:
+elif args.LOCAL:
+%else:
+else:
+%endif
+    library_path = libcdb.download_libraries(${libc_repr})
+    if library_path:
+        exe = context.binary = ELF.patch_custom_libraries(${binary_repr}, library_path)
+        libc = exe.libc
+    else:
+        libc = ELF(${libc_repr})
+%if host:
+else:
+    libc = ELF(${libc_repr})
+%endif
 %endif
 
 %if host:
@@ -129,7 +157,7 @@ def start(argv=[], *a, **kw):
 # GDB will be launched if the exploit is run via e.g.
 # ./exploit.py GDB
 %endif
-gdbscript = '''
+gdbscript = f'''
 %if ctx.binary:
   %if 'main' in ctx.binary.symbols:
 tbreak main
@@ -138,7 +166,7 @@ tbreak *0x{exe.entry:x}
   %endif
 %endif
 continue
-'''.format(**locals())
+'''
 %endif
 
 

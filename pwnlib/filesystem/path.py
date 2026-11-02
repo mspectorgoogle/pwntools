@@ -1,10 +1,6 @@
-import six
 import tempfile
 
-if six.PY3:
-    from pathlib import *
-else:
-    from pathlib2 import *
+from pathlib import *
 
 @classmethod
 def mktemp(cls):
@@ -14,5 +10,5 @@ def mktemp(cls):
 def mkdtemp(cls):
     return cls(tempfile.mkdtemp())
 
-Path.mktemp = mktemp
-Path.mkdtemp = mkdtemp
+setattr(Path, 'mktemp', mktemp)
+setattr(Path, 'mkdtemp', mkdtemp)
